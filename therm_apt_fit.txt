@@ -1,0 +1,8 @@
+APT regression:
+temp_f = -28.333951 * volts + 190.802315
+points = 198
+R2 = 0.96578
+updated = 2026-08-04 03:59:05
+
+Use this in code as:
+temp_f = (-28.333951 * volts) + (190.802315)

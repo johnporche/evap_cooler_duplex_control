@@ -1,0 +1,8 @@
+1ST regression:
+temp_f = -26.286745 * volts + 182.490654
+points = 202
+R2 = 0.99782
+updated = 2026-08-04 03:59:35
+
+Use this in code as:
+temp_f = (-26.286745 * volts) + (182.490654)
