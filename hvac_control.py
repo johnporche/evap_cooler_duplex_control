@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import signal
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -22,12 +23,16 @@ except ImportError:
 # USER CONFIGURATION
 # ============================================================
 
-CSV_LOG_FILE = "/home/pi/hvac_state_log.csv"
-EVENT_LOG_FILE = "/home/pi/hvac_events_log.txt"
-CALIBRATION_FILE = "/home/pi/oat_calibration.csv"
-THERM_REGRESSION_FILE = "/home/pi/therm_regressions.json"
-THERM_APT_FIT_FILE = "/home/pi/therm_apt_fit.txt"
-THERM_1ST_FIT_FILE = "/home/pi/therm_1stflr_fit.txt"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.environ.get("HVAC_LOG_DIR", "/home/pi")
+
+CSV_LOG_FILE = os.path.join(LOG_DIR, "hvac_state_log.csv")
+EVENT_LOG_FILE = os.path.join(LOG_DIR, "hvac_events_log.txt")
+
+CALIBRATION_FILE = os.path.join(SCRIPT_DIR, "oat_calibration.csv")
+THERM_REGRESSION_FILE = os.path.join(SCRIPT_DIR, "therm_regressions.json")
+THERM_APT_FIT_FILE = os.path.join(SCRIPT_DIR, "therm_apt_fit.txt")
+THERM_1ST_FIT_FILE = os.path.join(SCRIPT_DIR, "therm_1stflr_fit.txt")
 
 FACTORY_TEMP_MIN_C = -50.0
 FACTORY_TEMP_MAX_C = 50.0
@@ -126,10 +131,10 @@ DAMPER_REVERSE_PENALTY_FACTOR = 1.0
 DAMPER_MAX_SETTLE_SECONDS = 240.0
 
 # Adaptive prewet logic.
-PREWET_MIN_SECONDS = 0.0
-PREWET_SHORT_SECONDS = 5.0
-PREWET_NORMAL_SECONDS = 5.0
-PREWET_LONG_SECONDS = 5.0
+PREWET_MIN_SECONDS = 60.0
+PREWET_SHORT_SECONDS = 70.0
+PREWET_NORMAL_SECONDS = 80.0
+PREWET_LONG_SECONDS = 90.0
 
 PAD_WET_MEMORY_SECONDS = 15 * 60
 PAD_DRY_TIME_SECONDS = 60 * 60
@@ -216,6 +221,7 @@ current_prewet_seconds = 0.0
 current_prewet_reason = ""
 vent_state_start_time = None
 vent_timed_out = False
+shutdown_requested = False
 
 if ASTRAL_AVAILABLE:
     location = LocationInfo(
@@ -247,6 +253,17 @@ def console_event(message):
 
     with open(EVENT_LOG_FILE, "a") as f:
         f.write(line + "\n")
+
+
+def request_shutdown(signum, frame):
+    # Keep signal handling minimal.  The main loop observes this flag and then
+    # exits through the existing `finally` block that places outputs in their
+    # safe state.
+    global shutdown_requested
+    shutdown_requested = True
+
+
+signal.signal(signal.SIGTERM, request_shutdown)
 
 
 # ============================================================
@@ -1180,7 +1197,7 @@ def determine_prewet_seconds(now_mono, oat_f):
 #
 # PREPARE
 #   Dampers are commanded first.
-#   Fan and pump are held off.
+#   System and pump are on for prewet; fan is held off.
 #   Damper progress is earned while STATIC_PRESSURE is True.
 #   Damper progress is lost while STATIC_PRESSURE is False.
 #
@@ -1598,7 +1615,7 @@ try:
     csv_fieldnames = list(first_row.keys())
     ensure_csv_header(csv_fieldnames)
 
-    while True:
+    while not shutdown_requested:
         now_mono = time.monotonic()
         dt = now_mono - last_loop_time
         last_loop_time = now_mono
@@ -1772,6 +1789,8 @@ try:
             last_csv_time = now_mono
 
         time.sleep(LOOP_INTERVAL_SECONDS)
+
+    console_event("Controller shutdown requested")
 
 except KeyboardInterrupt:
     console_event("Controller interrupted by user")
