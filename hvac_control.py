@@ -84,6 +84,7 @@ FAN_SPEED_FEEDBACK_TYP_VOLTS = {
 
 CSV_INTERVAL_SECONDS = 5.0
 LOOP_INTERVAL_SECONDS = 0.1
+CONSOLE_HEARTBEAT_SECONDS = 5 * 60
 
 MOUNTAIN_TZ = ZoneInfo("America/Denver")
 
@@ -96,14 +97,27 @@ LOCATION_LONGITUDE = -104.9903
 # If 10 V equals a raw value of 10000, leave this at 1000.
 AO_SCALE = 1000
 
-# Fan ramp settings.
-# 0.25 V/sec means 0 V to 10 V takes about 40 seconds.
-FAN_RAMP_VOLTS_PER_SECOND = 0.25
+# Fan ramp settings.  Upward movement is deliberately slower for a gentle
+# start.  Downward movement remains faster, but is still controlled.
+# Limiting dt prevents a delayed loop iteration from creating a voltage jump.
+FAN_RAMP_UP_VOLTS_PER_SECOND = 0.10
+FAN_RAMP_DOWN_VOLTS_PER_SECOND = 0.20
+FAN_RAMP_MAX_DT_SECONDS = 0.5
 
 LOW_FAN_TARGET_SPEED = 1
 MED_FAN_TARGET_SPEED = 5
 HIGH_FAN_TARGET_SPEED = 10
 NO_COOL_TARGET_SPEED = 0
+
+# Combined fan target. Rows are Main Floor demand and columns are Apartment
+# demand. Each thermostat is normalized to its highest active stage before
+# this table is consulted (HIGH > MED > LOW > OFF).
+FAN_TARGET_MAP = {
+    "OFF":  {"OFF": 0, "LOW": 1, "MED": 5, "HIGH": 8},
+    "LOW":  {"OFF": 1, "LOW": 2, "MED": 7, "HIGH": 10},
+    "MED":  {"OFF": 5, "LOW": 7, "MED": 7, "HIGH": 10},
+    "HIGH": {"OFF": 8, "LOW": 10, "MED": 10, "HIGH": 10},
+}
 
 # Fan-only (VENT) operation.  Ecobee commonly keeps its G/fan output active
 # for a few minutes after ending a cooling call.  During that period the
@@ -303,6 +317,18 @@ def get_floor_request(prefix):
     }
 
 
+def demand_level(request, air_allowed):
+    if not air_allowed:
+        return "OFF"
+    if request["high"]:
+        return "HIGH"
+    if request["med"]:
+        return "MED"
+    if request["low"]:
+        return "LOW"
+    return "OFF"
+
+
 def clamp(value, low, high):
     return max(low, min(high, value))
 
@@ -337,11 +363,6 @@ def fan_command_volts_for_speed(target_speed, actual_speed):
         return FAN_SPEED_COMMAND_VOLTS_DEC[target_speed]
     else:
         return FAN_SPEED_COMMAND_VOLTS_INC[target_speed]
-
-CONSOLE_TEMP_DELTA_F = 1.0
-
-last_console_display_state = None
-
 
 def x_if_true(value):
     return "X" if bool(value) else "-"
@@ -384,12 +405,6 @@ def fan_call_combined(low_call, med_call, high_call):
     return "-"
 
 
-def rounded_temp_bucket(temp_f):
-    if temp_f is None:
-        return None
-    return int(round(float(temp_f)))
-
-
 def bms_output_on(raw_value):
     return int(raw_value) > 0
 
@@ -423,6 +438,8 @@ def console_status_line(
     now = mountain_now()
 
     oat_volts = raw_to_volts(oat_raw)
+    frst_supply_delta_f = frst_supply_f - therm_supply_f
+    apt_supply_delta_f = apt_supply_f - therm_supply_f
 
     frst_call = thermostat_call_symbol(
         b("FRST_HEAT"),
@@ -471,7 +488,7 @@ def console_status_line(
 
     return (
         f"{sunrise_flag(now)} "
-        f"{oat_f:5.1f}F/{oat_volts:4.2f}V "
+        f"{oat_f:5.1f}F/{oat_volts:6.4f}V "
 
         f"{frst_call} "
         f"{x_if_true(b('FRST_LOW'))} "
@@ -502,18 +519,14 @@ def console_status_line(
         f"{therm_supply_f:5.1f} "
 
         f"{damper_symbol(frst_dmp_close)} "
-        f"{frst_supply_f:5.1f} "
+        f"{frst_supply_delta_f:+5.1f} "
 
         f"{damper_symbol(apt_dmp_close)} "
-        f"{apt_supply_f:5.1f} "
+        f"{apt_supply_delta_f:+5.1f} "
 
         f"{static_symbol}"
     )
 def console_change_key(
-    oat_f,
-    therm_supply_f,
-    frst_supply_f,
-    apt_supply_f,
     frst_dmp_close,
     apt_dmp_close,
     need_damper_settle,
@@ -521,8 +534,6 @@ def console_change_key(
     fan_actual_speed
 ):
     return (
-        rounded_temp_bucket(oat_f),
-
         thermostat_call_symbol(
             b("FRST_HEAT"),
             b("FRST_COOL")
@@ -551,14 +562,8 @@ def console_change_key(
         level_symbol(fan_target_speed),
         level_symbol(fan_actual_speed),
 
-        rounded_temp_bucket(therm_supply_f),
-
         damper_symbol(frst_dmp_close),
-        rounded_temp_bucket(frst_supply_f),
-
         damper_symbol(apt_dmp_close),
-        rounded_temp_bucket(apt_supply_f),
-
         b("STATIC_PRESSURE")
     )
 
@@ -1079,60 +1084,15 @@ def apply_airflow_damper_logic(floor_requests):
 # ============================================================
 # FAN TARGET AND RAMP
 # ============================================================
-#
-#    0   L   M   H
-# 0  0   1   3   7
-# L  1   2   5   8
-# M  4   5   6   9
-# H  7   8   9  10
-
-def determine_fan_target_speed(
-    frst_air_allowed,
-    apt_air_allowed,
-    floor_requests,
-):
-    any_air = frst_air_allowed or apt_air_allowed
-    frst = floor_requests["FRST"]
-    apt = floor_requests["APT"]
-    frst_off = not frst["fan"]
-    apt_off = not apt["fan"]
-    
-    if not any_air:
-        return NO_COOL_TARGET_SPEED, "OFF"
-    if frst_off and apt_off:
-        return 0, "0"
-    if (frst_off and apt["low"]) or (frst["low"] and apt_off):
-        return 1,"1"
-    if frst["low"] and apt["low"]:
-        return 2,"2"
-    if frst_off and apt["med"]:
-        return 3,"3"
-    if frst["med"] and apt_off:
-        return 4,"4"
-    if (frst["med"] and apt["low"]) or (frst["low"] and apt["med"]):
-        return 5,"5"
-    if frst["med"] and apt["med"]:
-        return 6,"6"
-    if (frst["high"] and apt_off) or (frst_off and apt["high"]):
-        return 7,"7"
-    if (frst["high"] and apt["low"]) or (frst["low"] and apt["high"]):
-        return 8,"8"
-    if (frst["med"] and apt["high"]) or (frst["high"] and apt["med"]):
-        return 9,"9"
-    if frst["high"] and apt["high"]:
-        return 10,"10"
-    return LOW_FAN_TARGET_SPEED, "COOL_DEFAULT_LOW"
-
-
-
-
 def ramp_fan_voltage(current, target, dt):
-    max_change = FAN_RAMP_VOLTS_PER_SECOND * dt
+    safe_dt = clamp(dt, 0.0, FAN_RAMP_MAX_DT_SECONDS)
 
     if current < target:
+        max_change = FAN_RAMP_UP_VOLTS_PER_SECOND * safe_dt
         return min(current + max_change, target)
 
     if current > target:
+        max_change = FAN_RAMP_DOWN_VOLTS_PER_SECOND * safe_dt
         return max(current - max_change, target)
 
     return current
@@ -1461,6 +1421,7 @@ def get_state_snapshot(extra):
     row.update(sun_columns(now))
 
     row["oat_revpi_raw"] = oat_raw
+    row["oat_revpi_volts"] = round(raw_to_volts(oat_raw), 4)
     row["oat_calibrated_boiler_f"] = (
         round(oat_calibrated_f, 2) if oat_calibrated_f is not None else ""
     )
@@ -1485,6 +1446,10 @@ def get_state_snapshot(extra):
         temp_f = supply_temp_f_from_raw(raw, zone)
         row[field_prefix + "_raw"] = raw
         row[field_prefix + "_f"] = round(temp_f, 2)
+        row[field_prefix + "_delta_from_supply_f"] = round(
+            temp_f - therm_supply_f,
+            2,
+        )
         row[field_prefix + "_source"] = (
             os.path.basename(model["source"])
             if model is not None
@@ -1576,6 +1541,7 @@ try:
         console_event("Install with: pip3 install astral")
 
     last_console_state = None
+    last_console_time = None
     last_csv_time = 0.0
     last_loop_time = time.monotonic()
 
@@ -1602,6 +1568,8 @@ try:
         "apt_heat_allowed": False,
         "frst_request_mode": "OFF",
         "apt_request_mode": "OFF",
+        "frst_demand_level": "OFF",
+        "apt_demand_level": "OFF",
         "cooling_requested": False,
         "vent_requested": False,
         "vent_timed_out": False,
@@ -1667,12 +1635,18 @@ try:
         fan_actual_speed, fan_feedback_error = fan_feedback_speed_from_volts(
                                                fan_feedback_volts  )
 
+        frst_demand_level = demand_level(
+            floor_requests["FRST"],
+            frst_air_allowed,
+        )
+        apt_demand_level = demand_level(
+            floor_requests["APT"],
+            apt_air_allowed,
+        )
+
         if fan_allowed:
-           fan_target_speed, fan_request = determine_fan_target_speed(
-              frst_air_allowed,
-              apt_air_allowed,
-              floor_requests,
-            )
+           fan_target_speed = FAN_TARGET_MAP[frst_demand_level][apt_demand_level]
+           fan_request = str(fan_target_speed)
            if vent_requested and not cooling_requested:
                fan_target_speed = min(
                    fan_target_speed,
@@ -1720,10 +1694,6 @@ try:
         )
 
         console_state = console_change_key(
-            oat_calibrated_f,
-            therm_supply_f,
-            frst_supply_f,
-            apt_supply_f,
             frst_dmp_close,
             apt_dmp_close,
             need_damper_settle,
@@ -1731,7 +1701,12 @@ try:
             fan_actual_speed
             )
 
-        if console_state != last_console_state:
+        heartbeat_due = (
+            last_console_time is None
+            or now_mono - last_console_time >= CONSOLE_HEARTBEAT_SECONDS
+        )
+
+        if console_state != last_console_state or heartbeat_due:
             console_event(
                 console_status_line(
                     oat_calibrated_f,
@@ -1748,6 +1723,7 @@ try:
                     fan_actual_speed
                 )
             )
+            last_console_time = now_mono
 
         last_console_state = console_state
 
@@ -1776,6 +1752,8 @@ try:
                 "apt_heat_allowed": apt_heat_allowed,
                 "frst_request_mode": floor_requests["FRST"]["mode"],
                 "apt_request_mode": floor_requests["APT"]["mode"],
+                "frst_demand_level": frst_demand_level,
+                "apt_demand_level": apt_demand_level,
                 "cooling_requested": cooling_requested,
                 "vent_requested": vent_requested,
                 "vent_timed_out": vent_timed_out,
