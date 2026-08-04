@@ -3,7 +3,10 @@
 import revpimodio2
 import time
 import csv
+import json
+import math
 import os
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -22,6 +25,9 @@ except ImportError:
 CSV_LOG_FILE = "/home/pi/hvac_state_log.csv"
 EVENT_LOG_FILE = "/home/pi/hvac_events_log.txt"
 CALIBRATION_FILE = "/home/pi/oat_calibration.csv"
+THERM_REGRESSION_FILE = "/home/pi/therm_regressions.json"
+THERM_APT_FIT_FILE = "/home/pi/therm_apt_fit.txt"
+THERM_1ST_FIT_FILE = "/home/pi/therm_1stflr_fit.txt"
 
 FACTORY_TEMP_MIN_C = -50.0
 FACTORY_TEMP_MAX_C = 50.0
@@ -93,6 +99,12 @@ LOW_FAN_TARGET_SPEED = 1
 MED_FAN_TARGET_SPEED = 5
 HIGH_FAN_TARGET_SPEED = 10
 NO_COOL_TARGET_SPEED = 0
+
+# Fan-only (VENT) operation.  Ecobee commonly keeps its G/fan output active
+# for a few minutes after ending a cooling call.  During that period the
+# blower may run, but the evaporative-cooler pump must remain off.
+VENT_MAX_TARGET_SPEED = 2
+MAX_VENT_SECONDS = 15 * 60
 
 # Warm weather shutdown hysteresis.
 # WWSD turns on at 70 F and stays on until OAT drops to 65 F.
@@ -187,6 +199,8 @@ last_calls = {
 
 calibration_points = []
 calibration_mtime = None
+supply_regressions = {}
+supply_regression_signature = None
 
 sun_cache_date = None
 sun_cache = None
@@ -200,6 +214,8 @@ last_pump_on_time = None
 last_cooling_end_time = None
 current_prewet_seconds = 0.0
 current_prewet_reason = ""
+vent_state_start_time = None
+vent_timed_out = False
 
 if ASTRAL_AVAILABLE:
     location = LocationInfo(
@@ -239,6 +255,35 @@ def console_event(message):
 
 def b(name):
     return bool(inputs[name].value)
+
+
+def get_floor_request(prefix):
+    """Return one internally consistent snapshot of a floor's thermostat inputs."""
+    heat = b(prefix + "_HEAT")
+    cool = b(prefix + "_COOL")
+    low = b(prefix + "_LOW")
+    med = b(prefix + "_MED")
+    high = b(prefix + "_HIGH")
+    fan = low or med or high
+
+    if heat:
+        mode = "HEAT"
+    elif cool:
+        mode = "COOL"
+    elif fan:
+        mode = "VENT"
+    else:
+        mode = "OFF"
+
+    return {
+        "mode": mode,
+        "heat": heat,
+        "cool": cool,
+        "fan": fan,
+        "low": low,
+        "med": med,
+        "high": high,
+    }
 
 
 def clamp(value, low, high):
@@ -553,11 +598,191 @@ def sun_columns(now):
 
 
 
-def supply_temp_f_from_raw(raw_value):
+def factory_supply_temp_f_from_raw(raw_value):
     raw = float(raw_value)
     raw = clamp(raw, 0.0, 10000.0)
 
     return 40.0 + (raw / 10000.0) * (90.0 - 40.0)
+
+
+def _regression_timestamp(value, fallback):
+    if value:
+        try:
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").timestamp()
+        except (TypeError, ValueError):
+            pass
+    return fallback
+
+
+def _validated_regression(model, source, source_mtime):
+    slope = float(model["slope"])
+    intercept = float(model["intercept"])
+    r2 = float(model["r2"]) if model.get("r2") is not None else None
+    points = int(model["points"]) if model.get("points") is not None else None
+
+    if not math.isfinite(slope) or not math.isfinite(intercept):
+        raise ValueError("non-finite regression coefficient")
+    if slope >= 0.0:
+        raise ValueError("expected a negative thermistor regression slope")
+    if r2 is not None and not 0.0 <= r2 <= 1.0:
+        raise ValueError("R2 must be between 0 and 1")
+    if points is not None and points < 2:
+        raise ValueError("regression requires at least two points")
+
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "r2": r2,
+        "points": points,
+        "updated": model.get("updated", ""),
+        "sort_time": _regression_timestamp(model.get("updated"), source_mtime),
+        "source": source,
+    }
+
+
+def _load_regression_json(filename):
+    with open(filename, "r") as f:
+        data = json.load(f)
+
+    source_mtime = os.path.getmtime(filename)
+    candidates = {}
+    for zone in ("1ST", "APT"):
+        if zone in data:
+            candidates[zone] = _validated_regression(
+                data[zone],
+                filename,
+                source_mtime,
+            )
+    return candidates
+
+
+def _load_regression_text(filename, zone):
+    with open(filename, "r") as f:
+        text = f.read()
+
+    equation = re.search(
+        r"temp_f\s*=\s*\(?\s*([-+]?\d+(?:\.\d+)?)\s*\*\s*volts\s*\)?"
+        r"\s*\+\s*\(?\s*([-+]?\d+(?:\.\d+)?)",
+        text,
+    )
+    if equation is None:
+        raise ValueError("temperature regression equation not found")
+
+    def optional(pattern, converter):
+        match = re.search(pattern, text, re.IGNORECASE)
+        return converter(match.group(1)) if match else None
+
+    model = {
+        "slope": float(equation.group(1)),
+        "intercept": float(equation.group(2)),
+        "points": optional(r"points\s*=\s*(\d+)", int),
+        "r2": optional(r"R2\s*=\s*([-+]?\d+(?:\.\d+)?)", float),
+        "updated": optional(
+            r"updated\s*=\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})",
+            str,
+        ) or "",
+    }
+    return {
+        zone: _validated_regression(
+            model,
+            filename,
+            os.path.getmtime(filename),
+        )
+    }
+
+
+def _supply_regression_file_signature():
+    signature = []
+    for filename in (
+        THERM_REGRESSION_FILE,
+        THERM_APT_FIT_FILE,
+        THERM_1ST_FIT_FILE,
+    ):
+        try:
+            stat = os.stat(filename)
+            signature.append((filename, stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            signature.append((filename, None, None))
+    return tuple(signature)
+
+
+def get_supply_regressions():
+    global supply_regressions
+    global supply_regression_signature
+
+    signature = _supply_regression_file_signature()
+    if signature == supply_regression_signature:
+        return supply_regressions
+
+    candidates = {"1ST": [], "APT": []}
+    errors = []
+    loaders = (
+        (THERM_REGRESSION_FILE, _load_regression_json, ()),
+        (THERM_APT_FIT_FILE, _load_regression_text, ("APT",)),
+        (THERM_1ST_FIT_FILE, _load_regression_text, ("1ST",)),
+    )
+
+    for filename, loader, args in loaders:
+        if not os.path.exists(filename):
+            continue
+        try:
+            loaded = loader(filename, *args)
+            for zone, model in loaded.items():
+                candidates[zone].append(model)
+        except Exception as e:
+            errors.append(os.path.basename(filename) + ": " + str(e))
+
+    selected = {}
+    for zone, models in candidates.items():
+        if models:
+            # Prefer the model with the newest embedded `updated` timestamp.
+            # On a tie, prefer JSON because it retains full coefficient precision.
+            selected[zone] = max(
+                models,
+                key=lambda model: (
+                    model["sort_time"],
+                    model["source"] == THERM_REGRESSION_FILE,
+                ),
+            )
+
+    if selected:
+        supply_regressions = selected
+        supply_regression_signature = signature
+        summary = []
+        for zone in ("1ST", "APT"):
+            if zone in selected:
+                model = selected[zone]
+                summary.append(
+                    zone
+                    + "="
+                    + os.path.basename(model["source"])
+                    + " R2="
+                    + (format(model["r2"], ".5f") if model["r2"] is not None else "n/a")
+                )
+        console_event("Reloaded supply temperature regressions: " + ", ".join(summary))
+    elif not supply_regressions:
+        supply_regression_signature = signature
+        console_event("No valid supply regressions; using factory formula")
+    else:
+        supply_regression_signature = signature
+        console_event("No valid updated supply regressions; retaining prior values")
+
+    if errors:
+        console_event("Supply regression load warning: " + "; ".join(errors))
+
+    return supply_regressions
+
+
+def supply_temp_f_from_raw(raw_value, zone=None):
+    raw = float(raw_value)
+    volts = raw_to_volts(raw)
+
+    if zone is not None:
+        model = get_supply_regressions().get(zone)
+        if model is not None:
+            return model["slope"] * volts + model["intercept"]
+
+    return factory_supply_temp_f_from_raw(raw)
 
 
 
@@ -757,8 +982,8 @@ def update_floor_modes(oat_calibrated_f):
 # ============================================================
 # DAMPER CONTROL
 # ============================================================
-def dampers_need_settle(frst_dmp_close, apt_dmp_close, cooling_requested):
-    if not cooling_requested:
+def dampers_need_settle(frst_dmp_close, apt_dmp_close, airflow_requested):
+    if not airflow_requested:
         return False
 
     # If both dampers are open, airflow path is safe.
@@ -766,29 +991,47 @@ def dampers_need_settle(frst_dmp_close, apt_dmp_close, cooling_requested):
         return False
 
     # If fan is already running, do not interrupt just because damper command changed.
-    if bms_state == "RUN":
+    if bms_state in ("RUN", "VENT"):
         return False
 
     # Otherwise, at least one damper is being commanded closed before startup.
     return True
 
 
-def apply_cooling_damper_logic():
-    frst_cool_allowed = b("FRST_COOL") and floor_modes["FRST"] == "COOL"
-    apt_cool_allowed = b("APT_COOL") and floor_modes["APT"] == "COOL"
+def apply_airflow_damper_logic(floor_requests):
+    frst_request = floor_requests["FRST"]
+    apt_request = floor_requests["APT"]
+
+    frst_cool_allowed = frst_request["cool"] and floor_modes["FRST"] == "COOL"
+    apt_cool_allowed = apt_request["cool"] and floor_modes["APT"] == "COOL"
+
+    # A fan request without heat or cool is the Ecobee's ventilation/fan-only
+    # request.  Only honor it while that floor is in cooling season mode so a
+    # heating fan overrun cannot accidentally start the evaporative cooler.
+    frst_vent_allowed = (
+        frst_request["mode"] == "VENT"
+        and floor_modes["FRST"] == "COOL"
+    )
+    apt_vent_allowed = (
+        apt_request["mode"] == "VENT"
+        and floor_modes["APT"] == "COOL"
+    )
+
+    frst_air_allowed = frst_cool_allowed or frst_vent_allowed
+    apt_air_allowed = apt_cool_allowed or apt_vent_allowed
 
     frst_close = False
     apt_close = False
 
-    if frst_cool_allowed and not apt_cool_allowed:
+    if frst_air_allowed and not apt_air_allowed:
         frst_close = False
         apt_close = True
 
-    elif apt_cool_allowed and not frst_cool_allowed:
+    elif apt_air_allowed and not frst_air_allowed:
         frst_close = True
         apt_close = False
 
-    elif frst_cool_allowed and apt_cool_allowed:
+    elif frst_air_allowed and apt_air_allowed:
         frst_close = False
         apt_close = False
 
@@ -804,7 +1047,16 @@ def apply_cooling_damper_logic():
     outputs["FRST_DMP_CLOSE"].value = frst_close
     outputs["APT_DMP_CLOSE"].value = apt_close
 
-    return frst_close, apt_close, frst_cool_allowed, apt_cool_allowed
+    return (
+        frst_close,
+        apt_close,
+        frst_cool_allowed,
+        apt_cool_allowed,
+        frst_vent_allowed,
+        apt_vent_allowed,
+        frst_air_allowed,
+        apt_air_allowed,
+    )
 
 
 # ============================================================
@@ -817,34 +1069,40 @@ def apply_cooling_damper_logic():
 # M  4   5   6   9
 # H  7   8   9  10
 
-def determine_fan_target_speed(frst_cool_allowed, apt_cool_allowed):
-    any_cool = frst_cool_allowed or apt_cool_allowed
-    frst_off = not b("FRST_LOW") and not b("FRST_MED") and not b("FRST_HIGH")
-    apt_off = not b("APT_LOW") and not b("APT_MED") and not b("APT_HIGH")
+def determine_fan_target_speed(
+    frst_air_allowed,
+    apt_air_allowed,
+    floor_requests,
+):
+    any_air = frst_air_allowed or apt_air_allowed
+    frst = floor_requests["FRST"]
+    apt = floor_requests["APT"]
+    frst_off = not frst["fan"]
+    apt_off = not apt["fan"]
     
-    if not any_cool:
+    if not any_air:
         return NO_COOL_TARGET_SPEED, "OFF"
     if frst_off and apt_off:
         return 0, "0"
-    if (frst_off and b("APT_LOW")) or (b("FRST_LOW") and apt_off):
+    if (frst_off and apt["low"]) or (frst["low"] and apt_off):
         return 1,"1"
-    if b("FRST_LOW") and b("APT_LOW"):
+    if frst["low"] and apt["low"]:
         return 2,"2"
-    if frst_off and b("APT_MED"):
+    if frst_off and apt["med"]:
         return 3,"3"
-    if b("FRST_MED") and apt_off:
+    if frst["med"] and apt_off:
         return 4,"4"
-    if (b("FRST_MED") and b("APT_LOW")) or (b("FRST_LOW") and b("APT_MED")):
+    if (frst["med"] and apt["low"]) or (frst["low"] and apt["med"]):
         return 5,"5"
-    if b("FRST_MED") and b("APT_MED"):
+    if frst["med"] and apt["med"]:
         return 6,"6"
-    if (b("FRST_HIGH") and apt_off) or (frst_off and b("APT_HIGH")):
+    if (frst["high"] and apt_off) or (frst_off and apt["high"]):
         return 7,"7"
-    if (b("FRST_HIGH") and b("APT_LOW")) or (b("FRST_LOW") and b("APT_HIGH")):
+    if (frst["high"] and apt["low"]) or (frst["low"] and apt["high"]):
         return 8,"8"
-    if (b("FRST_MED") and b("APT_HIGH")) or (b("FRST_HIGH") and b("APT_MED")):
+    if (frst["med"] and apt["high"]) or (frst["high"] and apt["med"]):
         return 9,"9"
-    if b("FRST_HIGH") and b("APT_HIGH"):
+    if frst["high"] and apt["high"]:
         return 10,"10"
     return LOW_FAN_TARGET_SPEED, "COOL_DEFAULT_LOW"
 
@@ -935,8 +1193,23 @@ def determine_prewet_seconds(now_mono, oat_f):
 #   Pump on.
 #   System on.
 #   Fan allowed to ramp toward Ecobee requested speed.
+#
+# VENT_PREPARE
+#   System on and pump off.
+#   Fan held off while a newly selected zone damper settles.
+#
+# VENT
+#   System on and pump off.
+#   Fan follows the Ecobee request, capped at VENT_MAX_TARGET_SPEED.
 # ============================================================
-def update_bms_sequence(cooling_requested, need_damper_settle, now_mono, dt, oat_f):
+def update_bms_sequence(
+    cooling_requested,
+    vent_requested,
+    need_damper_settle,
+    now_mono,
+    dt,
+    oat_f,
+):
     global bms_state
     global bms_state_start_time
     global static_ok_start_time
@@ -945,14 +1218,39 @@ def update_bms_sequence(cooling_requested, need_damper_settle, now_mono, dt, oat
     global last_cooling_end_time
     global current_prewet_seconds
     global current_prewet_reason
+    global vent_state_start_time
+    global vent_timed_out
 
     fan_allowed = False
     static_ok = b("STATIC_PRESSURE")
 
-    if not cooling_requested:
+    # Cooling always takes priority over ventilation.  The timeout latch is
+    # reset once the Ecobee removes its fan-only request.
+    vent_only_requested = vent_requested and not cooling_requested
+
+    if cooling_requested or not vent_requested:
+        vent_state_start_time = None
+        vent_timed_out = False
+    elif vent_state_start_time is None:
+        vent_state_start_time = now_mono
+
+    if (
+        vent_only_requested
+        and vent_state_start_time is not None
+        and now_mono - vent_state_start_time >= MAX_VENT_SECONDS
+    ):
+        if not vent_timed_out:
+            console_event("BMS VENT timeout: fan-only request exceeded limit")
+        vent_timed_out = True
+
+    if vent_timed_out:
+        vent_only_requested = False
+
+    if not cooling_requested and not vent_only_requested:
         if bms_state != "OFF":
-            console_event("BMS OFF: cooling request ended")
-            last_cooling_end_time = now_mono
+            console_event("BMS OFF: all airflow requests ended")
+            if outputs["BMS_PUMP_ON"].value > 0:
+                last_cooling_end_time = now_mono
 
         bms_state = "OFF"
         bms_state_start_time = now_mono
@@ -966,7 +1264,77 @@ def update_bms_sequence(cooling_requested, need_damper_settle, now_mono, dt, oat
 
         return bms_state, fan_allowed
 
-    if bms_state == "OFF":
+    if vent_only_requested:
+        if bms_state in ("RUN", "PREPARE"):
+            if outputs["BMS_PUMP_ON"].value > 0:
+                last_cooling_end_time = now_mono
+
+            # A normal post-cool transition keeps the fan running.  If the
+            # zone allocation changed at the same instant, pause for damper
+            # preparation before resuming ventilation.
+            bms_state = "VENT_PREPARE" if need_damper_settle else "VENT"
+            bms_state_start_time = now_mono
+            static_ok_start_time = None
+            damper_close_progress_seconds = 0.0
+            console_event("BMS VENT: cooling ended, fan-only request remains")
+
+        elif bms_state == "OFF":
+            bms_state = "VENT_PREPARE"
+            bms_state_start_time = now_mono
+            static_ok_start_time = None
+            damper_close_progress_seconds = 0.0
+            console_event("BMS VENT PREPARE: fan-only request started")
+
+        if bms_state == "VENT_PREPARE":
+            outputs["BMS_SYS_ON"].value = 10000
+            outputs["BMS_PUMP_ON"].value = 0
+            fan_allowed = False
+
+            if need_damper_settle:
+                if static_ok:
+                    damper_close_progress_seconds += dt
+                    if static_ok_start_time is None:
+                        static_ok_start_time = now_mono
+                else:
+                    damper_close_progress_seconds -= (
+                        dt * DAMPER_REVERSE_PENALTY_FACTOR
+                    )
+                    static_ok_start_time = None
+
+                damper_close_progress_seconds = clamp(
+                    damper_close_progress_seconds,
+                    0.0,
+                    DAMPER_REQUIRED_CLOSE_SECONDS,
+                )
+                static_ok_elapsed = 0.0
+                if static_ok_start_time is not None:
+                    static_ok_elapsed = now_mono - static_ok_start_time
+
+                damper_ready = (
+                    damper_close_progress_seconds >= DAMPER_REQUIRED_CLOSE_SECONDS
+                    and static_ok_elapsed >= DAMPER_STATIC_OK_SECONDS
+                )
+                damper_timeout = (
+                    now_mono - bms_state_start_time >= DAMPER_MAX_SETTLE_SECONDS
+                )
+            else:
+                damper_ready = True
+                damper_timeout = False
+
+            if damper_ready or damper_timeout:
+                bms_state = "VENT"
+                bms_state_start_time = now_mono
+                console_event("BMS VENT RUN: damper preparation complete")
+
+        elif bms_state == "VENT":
+            outputs["BMS_SYS_ON"].value = 10000
+            outputs["BMS_PUMP_ON"].value = 0
+            fan_allowed = True
+
+        return bms_state, fan_allowed
+
+    if bms_state in ("OFF", "VENT", "VENT_PREPARE"):
+        resumed_from_vent = bms_state in ("VENT", "VENT_PREPARE")
         bms_state = "PREPARE"
         bms_state_start_time = now_mono
         static_ok_start_time = None
@@ -977,7 +1345,8 @@ def update_bms_sequence(cooling_requested, need_damper_settle, now_mono, dt, oat
         )
 
         console_event(
-            "BMS PREPARE started: prewet="
+            ("BMS COOL resumed from vent: prewet=" if resumed_from_vent
+             else "BMS PREPARE started: prewet=")
             + format(current_prewet_seconds, ".0f")
             + " sec, damper_wait="
             + ("YES" if need_damper_settle else "no")
@@ -1088,6 +1457,27 @@ def get_state_snapshot(extra):
 
     row["therm_supply_raw"] = therm_supply_raw
     row["therm_supply_f"] = round(therm_supply_f, 2)
+
+    supply_models = get_supply_regressions()
+    for zone, input_name, field_prefix in (
+        ("1ST", "THERM_1ST", "therm_1st"),
+        ("APT", "THERM_APT", "therm_apt"),
+    ):
+        raw = analog_inputs[input_name].value
+        model = supply_models.get(zone)
+        temp_f = supply_temp_f_from_raw(raw, zone)
+        row[field_prefix + "_raw"] = raw
+        row[field_prefix + "_f"] = round(temp_f, 2)
+        row[field_prefix + "_source"] = (
+            os.path.basename(model["source"])
+            if model is not None
+            else "factory_formula"
+        )
+        row[field_prefix + "_slope"] = model["slope"] if model else ""
+        row[field_prefix + "_intercept"] = model["intercept"] if model else ""
+        row[field_prefix + "_r2"] = model["r2"] if model else ""
+        row[field_prefix + "_points"] = model["points"] if model else ""
+        row[field_prefix + "_updated"] = model["updated"] if model else ""
     row["warm_weather_shutdown"] = warm_weather_shutdown
     row["wwsd_on_temp_f"] = WWSD_ON_TEMP_F
     row["wwsd_off_temp_f"] = WWSD_OFF_TEMP_F
@@ -1126,7 +1516,26 @@ def get_state_snapshot(extra):
 
 
 def ensure_csv_header(fieldnames):
-    if not os.path.exists(CSV_LOG_FILE) or os.path.getsize(CSV_LOG_FILE) == 0:
+    needs_header = (
+        not os.path.exists(CSV_LOG_FILE)
+        or os.path.getsize(CSV_LOG_FILE) == 0
+    )
+
+    if not needs_header:
+        with open(CSV_LOG_FILE, "r", newline="") as f:
+            existing_header = next(csv.reader(f), [])
+
+        if existing_header != fieldnames:
+            stamp = mountain_now().strftime("%Y%m%d-%H%M%S")
+            root, ext = os.path.splitext(CSV_LOG_FILE)
+            archived_file = root + ".schema-" + stamp + ext
+            os.replace(CSV_LOG_FILE, archived_file)
+            console_event(
+                "CSV schema changed; archived prior log as " + archived_file
+            )
+            needs_header = True
+
+    if needs_header:
         with open(CSV_LOG_FILE, "w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -1168,9 +1577,19 @@ try:
         "need_damper_settle":False,
         "frst_cool_allowed": False,
         "apt_cool_allowed": False,
+        "frst_vent_allowed": False,
+        "apt_vent_allowed": False,
+        "frst_air_allowed": False,
+        "apt_air_allowed": False,
         "frst_heat_allowed": False,
         "apt_heat_allowed": False,
+        "frst_request_mode": "OFF",
+        "apt_request_mode": "OFF",
         "cooling_requested": False,
+        "vent_requested": False,
+        "vent_timed_out": False,
+        "airflow_requested": False,
+        "vent_active": False,
         "cooling_active": False,
         "last_pump_on_age_seconds": "",
         
@@ -1190,22 +1609,37 @@ try:
         update_wwsd(oat_calibrated_f)
         update_floor_modes(oat_calibrated_f)
 
+        floor_requests = {
+            "FRST": get_floor_request("FRST"),
+            "APT": get_floor_request("APT"),
+        }
+
         frst_heat_allowed, apt_heat_allowed = apply_heating_logic()
 
-        frst_dmp_close, apt_dmp_close, frst_cool_allowed, apt_cool_allowed = (
-            apply_cooling_damper_logic()
-        )
+        (
+            frst_dmp_close,
+            apt_dmp_close,
+            frst_cool_allowed,
+            apt_cool_allowed,
+            frst_vent_allowed,
+            apt_vent_allowed,
+            frst_air_allowed,
+            apt_air_allowed,
+        ) = apply_airflow_damper_logic(floor_requests)
 
         cooling_requested = frst_cool_allowed or apt_cool_allowed
+        vent_requested = frst_vent_allowed or apt_vent_allowed
+        airflow_requested = cooling_requested or vent_requested
 
         need_damper_settle = dampers_need_settle(
                              frst_dmp_close,
                              apt_dmp_close,
-                             cooling_requested
+                             airflow_requested
                              )
 
         bms_state_now, fan_allowed = update_bms_sequence(
                              cooling_requested,
+                             vent_requested,
                              need_damper_settle,
                              now_mono,
                              dt,
@@ -1218,9 +1652,16 @@ try:
 
         if fan_allowed:
            fan_target_speed, fan_request = determine_fan_target_speed(
-              frst_cool_allowed,
-              apt_cool_allowed
+              frst_air_allowed,
+              apt_air_allowed,
+              floor_requests,
             )
+           if vent_requested and not cooling_requested:
+               fan_target_speed = min(
+                   fan_target_speed,
+                   VENT_MAX_TARGET_SPEED,
+               )
+               fan_request = "VENT_" + str(fan_target_speed)
         else:
             fan_target_speed = 0
             fan_request = bms_state_now
@@ -1244,6 +1685,7 @@ try:
 
 
         cooling_active = cooling_requested and fan_allowed
+        vent_active = vent_requested and not cooling_requested and fan_allowed
         fan_error_volts = fan_target_volts - fan_current_volts
 
         if last_pump_on_time is None:
@@ -1251,8 +1693,14 @@ try:
         else:
             pump_age = round(now_mono - last_pump_on_time, 1)
 
-        frst_supply_f = supply_temp_f_from_raw(analog_inputs["THERM_1ST"].value)
-        apt_supply_f = supply_temp_f_from_raw(analog_inputs["THERM_APT"].value)
+        frst_supply_f = supply_temp_f_from_raw(
+            analog_inputs["THERM_1ST"].value,
+            "1ST",
+        )
+        apt_supply_f = supply_temp_f_from_raw(
+            analog_inputs["THERM_APT"].value,
+            "APT",
+        )
 
         console_state = console_change_key(
             oat_calibrated_f,
@@ -1303,9 +1751,19 @@ try:
                 "need_damper_settle": need_damper_settle,
                 "frst_cool_allowed": frst_cool_allowed,
                 "apt_cool_allowed": apt_cool_allowed,
+                "frst_vent_allowed": frst_vent_allowed,
+                "apt_vent_allowed": apt_vent_allowed,
+                "frst_air_allowed": frst_air_allowed,
+                "apt_air_allowed": apt_air_allowed,
                 "frst_heat_allowed": frst_heat_allowed,
                 "apt_heat_allowed": apt_heat_allowed,
+                "frst_request_mode": floor_requests["FRST"]["mode"],
+                "apt_request_mode": floor_requests["APT"]["mode"],
                 "cooling_requested": cooling_requested,
+                "vent_requested": vent_requested,
+                "vent_timed_out": vent_timed_out,
+                "airflow_requested": airflow_requested,
+                "vent_active": vent_active,
                 "cooling_active": cooling_active,
                 "last_pump_on_age_seconds": pump_age,
             })
