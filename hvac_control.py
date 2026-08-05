@@ -501,7 +501,7 @@ def console_status_line(
 
     return (
         f"{sunrise_flag(now)} "
-        f"{oat_f:5.1f}F/{oat_volts:6.4f}V "
+        f"{oat_f:5.1f}F/{oat_volts:6.3f}V "
 
         f"{frst_call} "
         f"{x_if_true(b('FRST_LOW'))} "
