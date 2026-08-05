@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evap-cooler-duplex-control"
+version = "0.1.0"
+description = "Control and reporting tools for a two-zone evaporative cooler"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+hvac-report = "hvac_reports.cli:main"
+hvac-log-maintain = "hvac_reports.maintenance:main"
+
+[tool.setuptools.packages.find]
+include = ["hvac_reports*"]

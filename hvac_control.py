@@ -10,6 +10,8 @@ import re
 import signal
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from hvac_log_manager import RotatingCsvLog, RotatingTextLog
+from hvac_prewet import select_prewet
 
 try:
     from astral import LocationInfo
@@ -26,8 +28,19 @@ except ImportError:
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_DIR = os.environ.get("HVAC_LOG_DIR", "/home/pi")
 
-CSV_LOG_FILE = os.path.join(LOG_DIR, "hvac_state_log.csv")
-EVENT_LOG_FILE = os.path.join(LOG_DIR, "hvac_events_log.txt")
+STATE_LOG_DIR = os.path.join(LOG_DIR, "state")
+EVENT_LOG_DIR = os.path.join(LOG_DIR, "events")
+LOG_MAX_BYTES = int(os.environ.get("HVAC_LOG_MAX_BYTES", 50 * 1024 * 1024))
+EVENT_LOG_MAX_BYTES = int(os.environ.get("HVAC_EVENT_LOG_MAX_BYTES", 25 * 1024 * 1024))
+
+state_log = RotatingCsvLog(
+    os.path.join(STATE_LOG_DIR, "current.csv"),
+    maximum_bytes=LOG_MAX_BYTES,
+)
+event_log = RotatingTextLog(
+    os.path.join(EVENT_LOG_DIR, "current.log"),
+    maximum_bytes=EVENT_LOG_MAX_BYTES,
+)
 
 CALIBRATION_FILE = os.path.join(SCRIPT_DIR, "oat_calibration.csv")
 THERM_REGRESSION_FILE = os.path.join(SCRIPT_DIR, "therm_regressions.json")
@@ -145,13 +158,15 @@ DAMPER_REVERSE_PENALTY_FACTOR = 1.0
 DAMPER_MAX_SETTLE_SECONDS = 240.0
 
 # Adaptive prewet logic.
-PREWET_MIN_SECONDS = 60.0
-PREWET_SHORT_SECONDS = 70.0
-PREWET_NORMAL_SECONDS = 80.0
+PREWET_MIN_SECONDS = 5.0
+PREWET_SHORT_SECONDS = 15.0
+PREWET_NORMAL_SECONDS = 60.0
 PREWET_LONG_SECONDS = 90.0
 
-PAD_WET_MEMORY_SECONDS = 15 * 60
+PAD_MIN_PREWET_WINDOW_SECONDS = 5 * 60
+PAD_SHORT_PREWET_WINDOW_SECONDS = 30 * 60
 PAD_DRY_TIME_SECONDS = 60 * 60
+PREWET_HOT_OAT_F = 85.0
 
 
 # ============================================================
@@ -264,9 +279,7 @@ def timestamp_local():
 def console_event(message):
     line = timestamp_local() + " | " + message
     print(line)
-
-    with open(EVENT_LOG_FILE, "a") as f:
-        f.write(line + "\n")
+    event_log.append(line, mountain_now())
 
 
 def request_shutdown(signum, frame):
@@ -1126,27 +1139,22 @@ def apply_heating_logic():
 # ============================================================
 
 def determine_prewet_seconds(now_mono, oat_f):
-    if last_pump_on_time is None:
-        return PREWET_LONG_SECONDS, "first_start"
+    seconds_since_pump = None
+    if last_pump_on_time is not None:
+        seconds_since_pump = now_mono - last_pump_on_time
 
-    seconds_since_pump = now_mono - last_pump_on_time
-
-    if seconds_since_pump <= PAD_WET_MEMORY_SECONDS:
-        return PREWET_MIN_SECONDS, "pads_recently_wet"
-
-    if oat_f is None:
-        return PREWET_NORMAL_SECONDS, "unknown_oat"
-
-    if seconds_since_pump >= PAD_DRY_TIME_SECONDS:
-        return PREWET_LONG_SECONDS, "pads_likely_dry"
-
-    if oat_f >= 85.0:
-        return PREWET_LONG_SECONDS, "hot_oat"
-
-    if oat_f >= 70.0:
-        return PREWET_NORMAL_SECONDS, "normal_cooling"
-
-    return PREWET_SHORT_SECONDS, "mild_oat"
+    return select_prewet(
+        seconds_since_pump=seconds_since_pump,
+        oat_f=oat_f,
+        minimum_seconds=PREWET_MIN_SECONDS,
+        short_seconds=PREWET_SHORT_SECONDS,
+        normal_seconds=PREWET_NORMAL_SECONDS,
+        long_seconds=PREWET_LONG_SECONDS,
+        minimum_window_seconds=PAD_MIN_PREWET_WINDOW_SECONDS,
+        short_window_seconds=PAD_SHORT_PREWET_WINDOW_SECONDS,
+        dry_time_seconds=PAD_DRY_TIME_SECONDS,
+        hot_oat_f=PREWET_HOT_OAT_F,
+    )
 
 
 # ============================================================
@@ -1498,35 +1506,11 @@ def get_state_snapshot(extra):
 
 
 def ensure_csv_header(fieldnames):
-    needs_header = (
-        not os.path.exists(CSV_LOG_FILE)
-        or os.path.getsize(CSV_LOG_FILE) == 0
-    )
-
-    if not needs_header:
-        with open(CSV_LOG_FILE, "r", newline="") as f:
-            existing_header = next(csv.reader(f), [])
-
-        if existing_header != fieldnames:
-            stamp = mountain_now().strftime("%Y%m%d-%H%M%S")
-            root, ext = os.path.splitext(CSV_LOG_FILE)
-            archived_file = root + ".schema-" + stamp + ext
-            os.replace(CSV_LOG_FILE, archived_file)
-            console_event(
-                "CSV schema changed; archived prior log as " + archived_file
-            )
-            needs_header = True
-
-    if needs_header:
-        with open(CSV_LOG_FILE, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
+    state_log.ensure_header(fieldnames, mountain_now())
 
 
 def append_csv(row, fieldnames):
-    with open(CSV_LOG_FILE, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writerow(row)
+    state_log.append(row, fieldnames, mountain_now())
 
 
 # ============================================================

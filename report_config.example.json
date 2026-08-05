@@ -1,0 +1,9 @@
+{
+  "site_name": "Evaporative Cooler Duplex",
+  "timezone": "America/Denver",
+  "latitude": 39.7392,
+  "longitude": -104.9903,
+  "expected_sample_seconds": 5.0,
+  "maximum_sample_gap_seconds": 30.0
+}
+

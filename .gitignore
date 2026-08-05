@@ -203,6 +203,21 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Runtime data and generated reports (never publish household telemetry)
+log/
+reports/
+tmp/
+*.aux
+*.fdb_latexmk
+*.fls
+*.out
+*.toc
+*.synctex.gz
+
+# Editor autosaves and macOS metadata
+\#*\#
+.DS_Store
+
 # Ruff stuff:
 .ruff_cache/
 
