@@ -131,6 +131,35 @@ promoted from 15 to 60 seconds, not all the way to the dry-pad 90-second
 duration. Damper preparation remains independent; the fan starts only when
 both prewet and any required damper-settle interval are complete.
 
+## Post-cooling fan operation and zone priority
+
+The controller recognizes post-cooling fan operation from the thermostat
+signal sequence, not from a remembered historical call. A zone enters `VENT`
+only when its `COOL` input changes from on to off while one of its fan-stage
+inputs remains on. The zone stays in `VENT` while that fan signal remains on,
+up to the 15-minute ventilation safety limit. A standalone fan request at
+controller startup or later in an idle period is not treated as post-cooling
+operation.
+
+Heating always cancels post-cooling state. Fan-stage inputs that accompany a
+`HEAT` call are ignored by the evaporative-cooler airflow logic because the
+cooler fan is not available for heating.
+
+Wet cooling has priority over post-cooling ventilation when the zones differ:
+
+- If one zone is cooling and the other is only in post-cooling `VENT`, the
+  cooling zone's damper opens and the post-cooling zone's damper closes.
+- If both zones are cooling, both dampers open.
+- If neither zone is cooling and both are in valid post-cooling `VENT`, both
+  dampers open.
+- If only one zone is in valid post-cooling `VENT`, its damper opens and the
+  inactive zone's damper closes.
+
+When cooling takes over from `VENT` and requires a damper to close, the fan is
+held off during `PREPARE` until prewet and damper-settle requirements are both
+satisfied. The pure transition and allocation rules are isolated in
+`hvac_airflow.py` and covered by unit tests.
+
 ## Cooler availability and MS1 fault reporting
 
 The controller samples the Seeley MS1 `PWR / ERROR CODE` signal through the
