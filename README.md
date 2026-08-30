@@ -138,6 +138,22 @@ The sync deliberately omits `--delete`, so a report removed from the RevPi is
 not automatically removed from the Mac archive. SSH key authentication must be
 configured because the background job cannot answer a password prompt.
 
+### Scheduled reports on the RevPi
+
+`scripts/generate_scheduled_reports.sh` uses the `America/Denver` calendar even
+when the RevPi system clock is configured for UTC. Run it daily after the prior
+solar day closes. It creates a daily report each run, a completed weekly report
+on Monday, completed seasonal reports on March 20, June 20, September 22, and
+December 21, and the completed annual report on March 20.
+
+The installed crontab runs at 10:00 UTC (03:00 MST or 04:00 MDT). `flock`
+prevents a second reporting process from starting while an earlier one is still
+running:
+
+```cron
+0 10 * * * /usr/bin/flock -n /tmp/hvac-reports.lock /usr/bin/nice -n 15 /home/pi/evap_cooler_duplex_control/scripts/generate_scheduled_reports.sh >> /home/pi/evap_cooler_duplex_control/log/reports-cron.log 2>&1
+```
+
 ## Adaptive prewet
 
 Prewet selection is isolated in `hvac_prewet.py` and covered by unit tests. The
