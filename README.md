@@ -213,6 +213,26 @@ If `HVAC_LOG_DIR` is not set, the existing `/home/pi` default remains in use.
 Legacy `hvac_state_log*.csv` files remain discoverable by `--log-dir` during
 the transition; they are not moved or deleted automatically.
 
+## Boot service
+
+The production controller runs under systemd rather than an attached terminal.
+Install the tracked unit and synchronous fail-safe output helper on the RevPi:
+
+```sh
+sudo install -o root -g root -m 0755 \
+  systemd/hvac-safe-outputs.py /usr/local/sbin/hvac-safe-outputs
+sudo install -o root -g root -m 0644 \
+  systemd/hvac-control.service /etc/systemd/system/hvac-control.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hvac-control.service
+```
+
+Only one controller process may access the HVAC outputs. Stop any manual
+screen or tmux instance before starting the service. View controller output
+with `journalctl -u hvac-control.service -f`. On every service stop or failure,
+`ExecStopPost` synchronously commands the fan, pump, cooler system, boilers,
+and damper-close outputs off, leaving both dampers open.
+
 Run maintenance from cron or a systemd timer, not from `hvac_control.py`:
 
 ```sh
