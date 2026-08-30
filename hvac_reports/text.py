@@ -125,7 +125,9 @@ DAILY AGGREGATION
 
 DIAGNOSTICS
   Static-pressure input OK   {v['static_pressure_ok_percent']:.1%} of samples
-  ERROR_IN active            {v['error_input_samples']} samples
+  MS1 ready                  {_value(v['ms1_ready_percent'], digits=1, suffix='%') if v['ms1_ready_percent'] is None else f"{v['ms1_ready_percent']:.1%}"}
+  MS1 fault                  {v['ms1_fault_samples']} samples
+  MS1 offline                {v['ms1_offline_samples']} samples
 
 Notes:
   * Durations omit gaps longer than the configured maximum sample gap.

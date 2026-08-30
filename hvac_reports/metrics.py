@@ -73,6 +73,7 @@ def analyze(rows, period, config):
     )]
     active_supply = _finite(rows, "therm_supply_f", lambda row: row.get("cooling_active"))
     oats = _finite(rows, "oat_calibrated_boiler_f")
+    ms1_rows = [row for row in rows if row.get("ms1_state")]
     values = {
         "period_hours": period.hours,
         "observed_hours": observed_seconds / 3600.0,
@@ -91,7 +92,12 @@ def analyze(rows, period, config):
         "static_pressure_ok_percent": (
             sum(bool(row.get("STATIC_PRESSURE")) for row in rows) / len(rows) if rows else 0.0
         ),
-        "error_input_samples": sum(bool(row.get("ERROR_IN")) for row in rows),
+        "ms1_fault_samples": sum(bool(row.get("ms1_fault_active")) for row in ms1_rows),
+        "ms1_offline_samples": sum(row.get("ms1_state") == "OFFLINE" for row in ms1_rows),
+        "ms1_ready_percent": (
+            sum(row.get("ms1_state") == "READY" for row in ms1_rows) / len(ms1_rows)
+            if ms1_rows else None
+        ),
     }
     daily_rows = [
         {"date": day, "observed_hours": data["observed"] / 3600.0,

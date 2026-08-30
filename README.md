@@ -131,6 +131,29 @@ promoted from 15 to 60 seconds, not all the way to the dry-pad 90-second
 duration. Damper preparation remains independent; the fan starts only when
 both prewet and any required damper-settle interval are complete.
 
+## Cooler availability and MS1 fault reporting
+
+The controller samples the Seeley MS1 `PWR / ERROR CODE` signal through the
+existing RevPi `ERROR_IN` analog channel every 0.1 second. A sustained high
+signal means the cooler is powered and ready, groups of low pulses are decoded
+as fault codes, and a low signal lasting 20 seconds means that the cooler is
+offline. Known MS1 codes are FC01 communication failure, FC02 failure to detect
+water at the probes, FC04 failure to clear the probes during drain, and FC07
+motor fault. Unknown pulse counts are still reported and inhibit operation.
+
+Any MS1 fault or offline state forces the cooler system, pump, and fan command
+off while leaving both zone dampers open. Faults are reported but are not
+automatically reset. The pulse timing constants are configurable near the top
+of `hvac_control.py`; validate them against a captured real fault waveform for
+the installed cooler model.
+
+Boiler availability is independent and follows the existing 70 F on / 65 F
+reset warm-weather shutdown. Evaporative pump operation has separate low-OAT
+hysteresis: it disables at 45 F and re-enables at 50 F. A cooling call during
+that lockout becomes fan-only free cooling when the MS1 is ready. An unknown
+OAT fails pump-safe. The old remembered per-floor OAT mode no longer gates
+thermostat calls, preventing cool morning calls from becoming stuck in IDLE.
+
 ## Log rotation and retention
 
 The controller writes only active files and performs fast atomic rotation:
@@ -177,8 +200,9 @@ hvac-log-maintain --log-root log --retention-days 400 --event-retention-days 90 
 
 The 400-day state default keeps enough compressed raw data to regenerate a
 complete spring-to-spring annual report on the device. Use a shorter period
-only when raw archives are copied off-device. Pruning refuses to remove state archives whose summary contains an active
-`ERROR_IN` sample or a bad static-pressure input. The active log is never a
+only when raw archives are copied off-device. Pruning refuses to remove state
+archives whose summary contains an MS1 fault, an MS1-offline sample, or a bad
+static-pressure input. The active log is never a
 pruning target. Event archives containing `SAFETY`, `ERROR`, `FAULT`, or
 timeout messages are preserved beyond normal event retention.
 

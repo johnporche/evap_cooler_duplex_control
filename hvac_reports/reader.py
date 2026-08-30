@@ -8,14 +8,18 @@ NUMERIC_FIELDS = {
     "oat_calibrated_boiler_f", "therm_supply_f",
     "therm_1st_delta_from_supply_f", "therm_apt_delta_from_supply_f",
     "fan_target_speed", "fan_actual_speed", "fan_current_volts",
+    "ERROR_IN", "ms1_status_raw", "ms1_status_volts", "ms1_fault_code",
+    "ms1_last_high_age_seconds", "ms1_last_transition_age_seconds",
 }
 BOOLEAN_FIELDS = {
     "FRST_COOL", "APT_COOL", "cooling_requested", "cooling_active",
-    "vent_requested", "vent_active", "STATIC_PRESSURE", "ERROR_IN",
+    "vent_requested", "vent_active", "STATIC_PRESSURE",
     "FRST_DMP_CLOSE", "APT_DMP_CLOSE",
     "frst_cool_allowed", "apt_cool_allowed",
     "frst_vent_allowed", "apt_vent_allowed",
     "frst_air_allowed", "apt_air_allowed", "airflow_requested",
+    "cooler_available", "cooler_low_oat_lockout", "ms1_power_available",
+    "ms1_fault_active", "frst_cool_to_vent", "apt_cool_to_vent",
 }
 
 

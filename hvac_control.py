@@ -11,6 +11,7 @@ import signal
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from hvac_log_manager import RotatingCsvLog, RotatingTextLog
+from hvac_ms1 import MS1Decoder, next_low_oat_lockout
 from hvac_prewet import select_prewet
 
 try:
@@ -143,11 +144,19 @@ MAX_VENT_SECONDS = 15 * 60
 WWSD_ON_TEMP_F = 70.0
 WWSD_OFF_TEMP_F = 65.0
 
-# Per-floor mode logic.
-# A floor can enter HEAT mode only at/below 50 F and last call was heat.
-# A floor can enter COOL mode only above 70 F and last call was cool.
-HEAT_MODE_OAT_F = 65.0
-COOL_MODE_OAT_F = 60.0
+# Evaporative cooling low-OAT hysteresis. Below the disable threshold, a
+# cooling call becomes fan-only/free cooling while the MS1 is available.
+COOL_PUMP_ENABLE_OAT_F = 50.0
+COOL_PUMP_DISABLE_OAT_F = 45.0
+
+# Seeley MS1 PWR / ERROR CODE input. The normal signal is approximately
+# 10-12 V, fault codes pulse low, and continuous low means unavailable.
+MS1_STATUS_LOW_VOLTS = 2.0
+MS1_STATUS_HIGH_VOLTS = 7.0
+MS1_STATUS_DEBOUNCE_SECONDS = 0.2
+MS1_PULSE_GROUP_GAP_SECONDS = 3.0
+MS1_OFFLINE_SECONDS = 20.0
+MS1_FAULT_CLEAR_HIGH_SECONDS = 15.0
 
 # Damper protection.
 # Damper progress is earned when STATIC_PRESSURE is True.
@@ -219,11 +228,12 @@ outputs = {
 
 fan_current_volts = 0.0
 
-warm_weather_shutdown = False
+warm_weather_shutdown = None
+cooler_low_oat_lockout = None
 
 floor_modes = {
-    "FRST": "IDLE",
-    "APT": "IDLE",
+    "FRST": "OFF",
+    "APT": "OFF",
 }
 
 last_calls = {
@@ -251,6 +261,16 @@ current_prewet_reason = ""
 vent_state_start_time = None
 vent_timed_out = False
 shutdown_requested = False
+
+ms1_decoder = MS1Decoder(
+    low_volts=MS1_STATUS_LOW_VOLTS,
+    high_volts=MS1_STATUS_HIGH_VOLTS,
+    debounce_seconds=MS1_STATUS_DEBOUNCE_SECONDS,
+    pulse_group_gap_seconds=MS1_PULSE_GROUP_GAP_SECONDS,
+    offline_seconds=MS1_OFFLINE_SECONDS,
+    fault_clear_high_seconds=MS1_FAULT_CLEAR_HIGH_SECONDS,
+)
+ms1_status = ms1_decoder.status(time.monotonic())
 
 if ASTRAL_AVAILABLE:
     location = LocationInfo(
@@ -489,10 +509,14 @@ def console_status_line(
     bms_sys_on = outputs["BMS_SYS_ON"].value > 0
     bms_pump_on = outputs["BMS_PUMP_ON"].value > 0
 
-    bms_error = (
-        "-" if bool(analog_inputs["ERROR_IN"].value)
-        else "X"
-    )
+    if ms1_status.state == "READY":
+        bms_error = "-"
+    elif ms1_status.state == "FAULT":
+        bms_error = "F" + str(ms1_status.fault_code or "?")
+    elif ms1_status.state == "OFFLINE":
+        bms_error = "X"
+    else:
+        bms_error = "?"
 
     static_symbol = (
         "-" if b("STATIC_PRESSURE")
@@ -574,6 +598,10 @@ def console_change_key(
 
         level_symbol(fan_target_speed),
         level_symbol(fan_actual_speed),
+
+        ms1_status.state,
+        ms1_status.fault_code,
+        cooler_low_oat_lockout,
 
         damper_symbol(frst_dmp_close),
         damper_symbol(apt_dmp_close),
@@ -946,7 +974,12 @@ def update_wwsd(oat_calibrated_f):
 
     old = warm_weather_shutdown
 
-    if (not warm_weather_shutdown) and oat_calibrated_f >= WWSD_ON_TEMP_F:
+    # At startup the prior hysteresis state is unknowable. Conservatively keep
+    # heat disabled above the 65 F reset threshold.
+    if warm_weather_shutdown is None:
+        warm_weather_shutdown = oat_calibrated_f > WWSD_OFF_TEMP_F
+
+    elif (not warm_weather_shutdown) and oat_calibrated_f >= WWSD_ON_TEMP_F:
         warm_weather_shutdown = True
 
     elif warm_weather_shutdown and oat_calibrated_f <= WWSD_OFF_TEMP_F:
@@ -954,7 +987,7 @@ def update_wwsd(oat_calibrated_f):
 
     outputs["WWSD"].value = 1 if warm_weather_shutdown else 0
 
-    if warm_weather_shutdown != old:
+    if old is not None and warm_weather_shutdown != old:
         if warm_weather_shutdown:
             console_event("WWSD ON: OAT=" + format(oat_calibrated_f, ".1f") + " F")
         else:
@@ -964,54 +997,76 @@ def update_wwsd(oat_calibrated_f):
 
 
 # ============================================================
-# FLOOR MODES
+# EQUIPMENT AVAILABILITY AND DIAGNOSTIC MODES
 # ============================================================
 
-def update_floor_modes(oat_calibrated_f):
-    global floor_modes
-    global last_calls
+def update_cooler_low_oat_lockout(oat_calibrated_f):
+    global cooler_low_oat_lockout
 
-    if b("FRST_HEAT"):
-        last_calls["FRST"] = "HEAT"
-    elif b("FRST_COOL"):
-        last_calls["FRST"] = "COOL"
+    old = cooler_low_oat_lockout
+    cooler_low_oat_lockout = next_low_oat_lockout(
+        cooler_low_oat_lockout,
+        oat_calibrated_f,
+        disable_f=COOL_PUMP_DISABLE_OAT_F,
+        enable_f=COOL_PUMP_ENABLE_OAT_F,
+    )
 
-    if b("APT_HEAT"):
-        last_calls["APT"] = "HEAT"
-    elif b("APT_COOL"):
-        last_calls["APT"] = "COOL"
+    if old is not None and cooler_low_oat_lockout != old:
+        console_event(
+            "Cooler low-OAT lockout "
+            + ("ON" if cooler_low_oat_lockout else "OFF")
+            + ": OAT="
+            + (format(oat_calibrated_f, ".1f") + " F" if oat_calibrated_f is not None else "unknown")
+        )
+    return cooler_low_oat_lockout
 
-    if oat_calibrated_f is None:
-        print("oat_calibrated is none")
-        return floor_modes
 
+def update_floor_diagnostics(floor_requests, cooler_available):
     old_modes = floor_modes.copy()
-
-    if oat_calibrated_f <= HEAT_MODE_OAT_F and last_calls["FRST"] == "HEAT":
-        floor_modes["FRST"] = "HEAT"
-
-    elif oat_calibrated_f > COOL_MODE_OAT_F and last_calls["FRST"] == "COOL":
-        floor_modes["FRST"] = "COOL"
-
-
-    if oat_calibrated_f <= HEAT_MODE_OAT_F and last_calls["APT"] == "HEAT":
-        floor_modes["APT"] = "HEAT"
-
-    elif oat_calibrated_f > COOL_MODE_OAT_F and last_calls["APT"] == "COOL":
-        floor_modes["APT"] = "COOL"
-
+    for prefix in ("FRST", "APT"):
+        request = floor_requests[prefix]
+        if request["heat"]:
+            last_calls[prefix] = "HEAT"
+            mode = "HEAT"
+        elif request["cool"]:
+            last_calls[prefix] = "COOL"
+            if not cooler_available:
+                mode = "COOL_BLOCKED"
+            elif cooler_low_oat_lockout:
+                mode = "FREE_COOL"
+            else:
+                mode = "COOL"
+        elif request["mode"] == "VENT":
+            mode = "VENT" if cooler_available and last_calls[prefix] == "COOL" else "OFF"
+        else:
+            mode = "OFF"
+        floor_modes[prefix] = mode
 
     if floor_modes != old_modes:
         console_event(
-            "Mode change | "
-            + "1st=" + floor_modes["FRST"]
-            + " last=" + str(last_calls["FRST"])
+            "Request mode | 1st=" + floor_modes["FRST"]
             + " | apt=" + floor_modes["APT"]
-            + " last=" + str(last_calls["APT"])
-            + " | OAT=" + format(oat_calibrated_f, ".1f") + " F"
         )
 
-    return floor_modes
+
+def log_ms1_change(old_status, new_status):
+    old_key = (old_status.state, old_status.fault_code)
+    new_key = (new_status.state, new_status.fault_code)
+    if old_key == new_key:
+        return
+    if new_status.state == "READY":
+        console_event("MS1 READY: cooler powered and no fault detected")
+    elif new_status.state == "OFFLINE":
+        console_event(
+            "MS1 OFFLINE: PWR/ERROR CODE signal remained low for "
+            + format(MS1_OFFLINE_SECONDS, ".0f") + " seconds"
+        )
+    elif new_status.state == "FAULT":
+        code = new_status.fault_code
+        console_event(
+            "MS1 FAULT FC" + (format(code, "02d") if code is not None else "??")
+            + ": " + (new_status.fault_description or "unknown fault")
+        )
 
 
 # ============================================================
@@ -1033,23 +1088,36 @@ def dampers_need_settle(frst_dmp_close, apt_dmp_close, airflow_requested):
     return True
 
 
-def apply_airflow_damper_logic(floor_requests):
+def apply_airflow_damper_logic(floor_requests, cooler_available):
     frst_request = floor_requests["FRST"]
     apt_request = floor_requests["APT"]
 
-    frst_cool_allowed = frst_request["cool"] and floor_modes["FRST"] == "COOL"
-    apt_cool_allowed = apt_request["cool"] and floor_modes["APT"] == "COOL"
+    wet_cooling_available = cooler_available and not cooler_low_oat_lockout
+    frst_cool_allowed = frst_request["cool"] and wet_cooling_available
+    apt_cool_allowed = apt_request["cool"] and wet_cooling_available
+    frst_cool_to_vent = (
+        frst_request["cool"] and cooler_available and cooler_low_oat_lockout
+    )
+    apt_cool_to_vent = (
+        apt_request["cool"] and cooler_available and cooler_low_oat_lockout
+    )
 
     # A fan request without heat or cool is the Ecobee's ventilation/fan-only
-    # request.  Only honor it while that floor is in cooling season mode so a
-    # heating fan overrun cannot accidentally start the evaporative cooler.
+    # request. Only honor it following that floor's cooling call so a heating
+    # fan overrun cannot accidentally take control of the evaporative cooler.
     frst_vent_allowed = (
-        frst_request["mode"] == "VENT"
-        and floor_modes["FRST"] == "COOL"
+        cooler_available
+        and (
+            frst_cool_to_vent
+            or (frst_request["mode"] == "VENT" and last_calls["FRST"] == "COOL")
+        )
     )
     apt_vent_allowed = (
-        apt_request["mode"] == "VENT"
-        and floor_modes["APT"] == "COOL"
+        cooler_available
+        and (
+            apt_cool_to_vent
+            or (apt_request["mode"] == "VENT" and last_calls["APT"] == "COOL")
+        )
     )
 
     frst_air_allowed = frst_cool_allowed or frst_vent_allowed
@@ -1089,9 +1157,23 @@ def apply_airflow_damper_logic(floor_requests):
         apt_cool_allowed,
         frst_vent_allowed,
         apt_vent_allowed,
+        frst_cool_to_vent,
+        apt_cool_to_vent,
         frst_air_allowed,
         apt_air_allowed,
     )
+
+
+def cooling_rejection_reason(request, cool_allowed, cool_to_vent):
+    if not request["cool"] or cool_allowed:
+        return ""
+    if cool_to_vent:
+        return "LOW_OAT_FREE_VENT"
+    if ms1_status.state == "FAULT":
+        return "MS1_FAULT_FC" + str(ms1_status.fault_code or "UNKNOWN")
+    if ms1_status.state == "OFFLINE":
+        return "MS1_OFFLINE"
+    return "MS1_" + ms1_status.state
 
 
 # ============================================================
@@ -1118,13 +1200,11 @@ def ramp_fan_voltage(current, target, dt):
 def apply_heating_logic():
     frst_heat_allowed = (
         b("FRST_HEAT")
-        and floor_modes["FRST"] == "HEAT"
         and not warm_weather_shutdown
     )
 
     apt_heat_allowed = (
         b("APT_HEAT")
-        and floor_modes["APT"] == "HEAT"
         and not warm_weather_shutdown  
     )
 
@@ -1471,6 +1551,28 @@ def get_state_snapshot(extra):
     row["warm_weather_shutdown"] = warm_weather_shutdown
     row["wwsd_on_temp_f"] = WWSD_ON_TEMP_F
     row["wwsd_off_temp_f"] = WWSD_OFF_TEMP_F
+    row["cooler_low_oat_lockout"] = cooler_low_oat_lockout
+    row["cool_pump_enable_oat_f"] = COOL_PUMP_ENABLE_OAT_F
+    row["cool_pump_disable_oat_f"] = COOL_PUMP_DISABLE_OAT_F
+
+    row["ms1_status_raw"] = analog_inputs["ERROR_IN"].value
+    row["ms1_status_volts"] = round(ms1_status.volts, 3)
+    row["ms1_status_level"] = ms1_status.level
+    row["ms1_state"] = ms1_status.state
+    row["ms1_power_available"] = ms1_status.powered
+    row["ms1_fault_active"] = ms1_status.fault_active
+    row["ms1_fault_code"] = (
+        ms1_status.fault_code if ms1_status.fault_code is not None else ""
+    )
+    row["ms1_fault_description"] = ms1_status.fault_description
+    row["ms1_last_high_age_seconds"] = (
+        round(ms1_status.last_high_age_seconds, 3)
+        if ms1_status.last_high_age_seconds is not None else ""
+    )
+    row["ms1_last_transition_age_seconds"] = (
+        round(ms1_status.last_transition_age_seconds, 3)
+        if ms1_status.last_transition_age_seconds is not None else ""
+    )
 
     row["frst_mode"] = floor_modes["FRST"]
     row["apt_mode"] = floor_modes["APT"]
@@ -1541,11 +1643,16 @@ try:
         "fan_error_volts": 0.0,
         "fan_speed_request": "OFF",
         "fan_allowed": False,
+        "cooler_available": False,
         "need_damper_settle":False,
         "frst_cool_allowed": False,
         "apt_cool_allowed": False,
         "frst_vent_allowed": False,
         "apt_vent_allowed": False,
+        "frst_cool_to_vent": False,
+        "apt_cool_to_vent": False,
+        "frst_cooling_rejection_reason": "",
+        "apt_cooling_rejection_reason": "",
         "frst_air_allowed": False,
         "apt_air_allowed": False,
         "frst_heat_allowed": False,
@@ -1576,12 +1683,22 @@ try:
         therm_supply_raw = analog_inputs["THERM_SUPPLY"].value
         therm_supply_f = supply_temp_f_from_raw(therm_supply_raw)
         update_wwsd(oat_calibrated_f)
-        update_floor_modes(oat_calibrated_f)
+        update_cooler_low_oat_lockout(oat_calibrated_f)
+
+        old_ms1_status = ms1_status
+        ms1_raw = analog_inputs["ERROR_IN"].value
+        ms1_status = ms1_decoder.update(
+            now_mono,
+            raw_to_volts(ms1_raw),
+        )
+        log_ms1_change(old_ms1_status, ms1_status)
+        cooler_available = ms1_status.state == "READY"
 
         floor_requests = {
             "FRST": get_floor_request("FRST"),
             "APT": get_floor_request("APT"),
         }
+        update_floor_diagnostics(floor_requests, cooler_available)
 
         frst_heat_allowed, apt_heat_allowed = apply_heating_logic()
 
@@ -1592,9 +1709,18 @@ try:
             apt_cool_allowed,
             frst_vent_allowed,
             apt_vent_allowed,
+            frst_cool_to_vent,
+            apt_cool_to_vent,
             frst_air_allowed,
             apt_air_allowed,
-        ) = apply_airflow_damper_logic(floor_requests)
+        ) = apply_airflow_damper_logic(floor_requests, cooler_available)
+
+        frst_cooling_rejection_reason = cooling_rejection_reason(
+            floor_requests["FRST"], frst_cool_allowed, frst_cool_to_vent
+        )
+        apt_cooling_rejection_reason = cooling_rejection_reason(
+            floor_requests["APT"], apt_cool_allowed, apt_cool_to_vent
+        )
 
         cooling_requested = frst_cool_allowed or apt_cool_allowed
         vent_requested = frst_vent_allowed or apt_vent_allowed
@@ -1651,6 +1777,11 @@ try:
             fan_target_volts,
             dt
             )
+
+        # Availability and fault inhibition are hard safety stops, not normal
+        # comfort ramp-down requests.
+        if not cooler_available:
+            fan_current_volts = 0.0
 
         outputs["ANALOG_FAN_SPEED_DRV"].value = ao_volts_to_raw(
             fan_current_volts
@@ -1725,11 +1856,16 @@ try:
                 "fan_error_volts": round(fan_error_volts, 3),
                 "fan_speed_request": fan_request,
                 "fan_allowed": fan_allowed,
+                "cooler_available": cooler_available,
                 "need_damper_settle": need_damper_settle,
                 "frst_cool_allowed": frst_cool_allowed,
                 "apt_cool_allowed": apt_cool_allowed,
                 "frst_vent_allowed": frst_vent_allowed,
                 "apt_vent_allowed": apt_vent_allowed,
+                "frst_cool_to_vent": frst_cool_to_vent,
+                "apt_cool_to_vent": apt_cool_to_vent,
+                "frst_cooling_rejection_reason": frst_cooling_rejection_reason,
+                "apt_cooling_rejection_reason": apt_cooling_rejection_reason,
                 "frst_air_allowed": frst_air_allowed,
                 "apt_air_allowed": apt_air_allowed,
                 "frst_heat_allowed": frst_heat_allowed,

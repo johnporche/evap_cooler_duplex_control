@@ -113,7 +113,9 @@ def _safe_to_prune(summary, cutoff):
     if not summary:
         return False
     metrics = summary.get("metrics", {})
-    if metrics.get("error_input_samples", 0):
+    if metrics.get("ms1_fault_samples", metrics.get("error_input_samples", 0)):
+        return False
+    if metrics.get("ms1_offline_samples", 0):
         return False
     if metrics.get("static_pressure_ok_percent", 1.0) < 0.99:
         return False

@@ -16,6 +16,7 @@ def _value(value, digits=1):
 
 def write_latex(path, config, period, metrics):
     v = metrics.values
+    ms1_ready = "--" if v["ms1_ready_percent"] is None else f"{v['ms1_ready_percent'] * 100:.1f}\\%"
     state_rows = "\n".join(f"{_escape(key)} & {hours:.2f} \\\\" for key, hours in metrics.state_hours.items()) or r"No observed state data & 0.00 \\"
     daily_rows = "\n".join(f"{row['date']} & {row['observed_hours']:.2f} & {row['cooling_hours']:.2f} & {row['vent_hours']:.2f} \\\\" for row in metrics.daily_rows) or r"No observed days & 0 & 0 & 0 \\"
     status = "COMPLETE" if v["coverage"] >= 0.98 else "INCOMPLETE DATA"
@@ -63,7 +64,9 @@ Observed: {v['observed_hours']:.2f} of {v['period_hours']:.2f} hours ({v['covera
 \hfill
 \begin{{tabular}}{{lr}}\toprule Diagnostic & Result\\\midrule
 Static-pressure input OK & {v['static_pressure_ok_percent'] * 100:.1f}\% of samples\\
-ERROR\_IN samples & {v['error_input_samples']}\\
+MS1 ready & {ms1_ready}\\
+MS1 fault samples & {v['ms1_fault_samples']}\\
+MS1 offline samples & {v['ms1_offline_samples']}\\
 \bottomrule\end{{tabular}}
 
 \section*{{Daily aggregation}}

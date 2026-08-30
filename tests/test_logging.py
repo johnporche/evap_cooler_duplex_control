@@ -23,13 +23,14 @@ class LoggingTests(unittest.TestCase):
     def test_csv_rotates_at_new_local_day(self):
         logger = RotatingCsvLog(self.root / "state" / "current.csv", maximum_bytes=100000)
         fields = ["timestamp_iso", "value"]
-        first = datetime(2026, 8, 4, 23, 59, tzinfo=self.tz)
+        today = datetime.now(self.tz).date()
+        first = datetime.combine(today, datetime.min.time(), tzinfo=self.tz) + timedelta(hours=23, minutes=59)
         second = first + timedelta(minutes=2)
         logger.append({"timestamp_iso": first.isoformat(), "value": 1}, fields, first)
         logger.append({"timestamp_iso": second.isoformat(), "value": 2}, fields, second)
         archives = list((self.root / "state" / "archive").rglob("*.csv"))
         self.assertEqual(len(archives), 1)
-        self.assertIn("2026-08-04", archives[0].name)
+        self.assertIn(first.date().isoformat(), archives[0].name)
         with (self.root / "state" / "current.csv").open() as stream:
             self.assertEqual(len(list(csv.DictReader(stream))), 1)
 
@@ -53,7 +54,29 @@ class LoggingTests(unittest.TestCase):
         period = ReportPeriod("test", "test", stamp - timedelta(minutes=1), stamp + timedelta(minutes=1))
         self.assertEqual(len(read_rows(paths, period)), 1)
 
+    def test_reader_keeps_ms1_voltage_numeric_and_fault_boolean(self):
+        path = self.root / "current.csv"
+        stamp = datetime(2026, 8, 4, 12, tzinfo=self.tz)
+        with path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=["timestamp_iso", "ERROR_IN", "ms1_status_volts", "ms1_fault_active"],
+            )
+            writer.writeheader()
+            writer.writerow({
+                "timestamp_iso": stamp.isoformat(),
+                "ERROR_IN": "10682",
+                "ms1_status_volts": "10.682",
+                "ms1_fault_active": "False",
+            })
+        period = ReportPeriod("test", "test", stamp - timedelta(minutes=1), stamp + timedelta(minutes=1))
+
+        row = read_rows([path], period)[0]
+
+        self.assertEqual(row["ERROR_IN"], 10682.0)
+        self.assertEqual(row["ms1_status_volts"], 10.682)
+        self.assertFalse(row["ms1_fault_active"])
+
 
 if __name__ == "__main__":
     unittest.main()
-
