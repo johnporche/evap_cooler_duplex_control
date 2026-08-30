@@ -10,6 +10,12 @@ import re
 import signal
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from hvac_airflow import (
+    dampers_require_startup_settle,
+    next_post_cool_state,
+    select_damper_commands,
+    select_zone_airflow,
+)
 from hvac_log_manager import RotatingCsvLog, RotatingTextLog
 from hvac_ms1 import MS1Decoder, next_low_oat_lockout
 from hvac_prewet import select_prewet
@@ -239,6 +245,16 @@ floor_modes = {
 last_calls = {
     "FRST": None,
     "APT": None,
+}
+
+previous_cool_calls = {
+    "FRST": False,
+    "APT": False,
+}
+
+post_cool_active = {
+    "FRST": False,
+    "APT": False,
 }
 
 calibration_points = []
@@ -1021,6 +1037,21 @@ def update_cooler_low_oat_lockout(oat_calibrated_f):
     return cooler_low_oat_lockout
 
 
+def update_post_cool_modes(floor_requests):
+    for prefix in ("FRST", "APT"):
+        request = floor_requests[prefix]
+        previous_cool_calls[prefix], post_cool_active[prefix] = (
+            next_post_cool_state(
+                previous_cool=previous_cool_calls[prefix],
+                post_cool_active=post_cool_active[prefix],
+                heat=request["heat"],
+                cool=request["cool"],
+                fan=request["fan"],
+                timed_out=vent_timed_out,
+            )
+        )
+
+
 def update_floor_diagnostics(floor_requests, cooler_available):
     old_modes = floor_modes.copy()
     for prefix in ("FRST", "APT"):
@@ -1036,8 +1067,8 @@ def update_floor_diagnostics(floor_requests, cooler_available):
                 mode = "FREE_COOL"
             else:
                 mode = "COOL"
-        elif request["mode"] == "VENT":
-            mode = "VENT" if cooler_available and last_calls[prefix] == "COOL" else "OFF"
+        elif post_cool_active[prefix]:
+            mode = "VENT" if cooler_available else "OFF"
         else:
             mode = "OFF"
         floor_modes[prefix] = mode
@@ -1073,19 +1104,12 @@ def log_ms1_change(old_status, new_status):
 # DAMPER CONTROL
 # ============================================================
 def dampers_need_settle(frst_dmp_close, apt_dmp_close, airflow_requested):
-    if not airflow_requested:
-        return False
-
-    # If both dampers are open, airflow path is safe.
-    if not frst_dmp_close and not apt_dmp_close:
-        return False
-
-    # If fan is already running, do not interrupt just because damper command changed.
-    if bms_state in ("RUN", "VENT"):
-        return False
-
-    # Otherwise, at least one damper is being commanded closed before startup.
-    return True
+    return dampers_require_startup_settle(
+        frst_dmp_close,
+        apt_dmp_close,
+        airflow_requested,
+        bms_state,
+    )
 
 
 def apply_airflow_damper_logic(floor_requests, cooler_available):
@@ -1102,45 +1126,38 @@ def apply_airflow_damper_logic(floor_requests, cooler_available):
         apt_request["cool"] and cooler_available and cooler_low_oat_lockout
     )
 
-    # A fan request without heat or cool is the Ecobee's ventilation/fan-only
-    # request. Only honor it following that floor's cooling call so a heating
-    # fan overrun cannot accidentally take control of the evaporative cooler.
+    # A fan request without heat or cool is honored only when a COOL falling
+    # edge established an active post-cool state for that zone. Standalone
+    # fan calls and all fan-stage inputs during heat are ignored.
     frst_vent_allowed = (
         cooler_available
         and (
             frst_cool_to_vent
-            or (frst_request["mode"] == "VENT" and last_calls["FRST"] == "COOL")
+            or (frst_request["mode"] == "VENT" and post_cool_active["FRST"])
         )
     )
     apt_vent_allowed = (
         cooler_available
         and (
             apt_cool_to_vent
-            or (apt_request["mode"] == "VENT" and last_calls["APT"] == "COOL")
+            or (apt_request["mode"] == "VENT" and post_cool_active["APT"])
         )
     )
 
-    frst_air_allowed = frst_cool_allowed or frst_vent_allowed
-    apt_air_allowed = apt_cool_allowed or apt_vent_allowed
+    # Wet cooling takes priority over post-cooling fan-only operation. A zone
+    # that is only ventilating is suppressed while the other zone cools. If
+    # neither zone is cooling, one or both valid fan-only requests are honored.
+    frst_air_allowed, apt_air_allowed = select_zone_airflow(
+        frst_cool_allowed,
+        apt_cool_allowed,
+        frst_vent_allowed,
+        apt_vent_allowed,
+    )
 
-    frst_close = False
-    apt_close = False
-
-    if frst_air_allowed and not apt_air_allowed:
-        frst_close = False
-        apt_close = True
-
-    elif apt_air_allowed and not frst_air_allowed:
-        frst_close = True
-        apt_close = False
-
-    elif frst_air_allowed and apt_air_allowed:
-        frst_close = False
-        apt_close = False
-
-    else:
-        frst_close = False
-        apt_close = False
+    frst_close, apt_close = select_damper_commands(
+        frst_air_allowed,
+        apt_air_allowed,
+    )
 
     if frst_close and apt_close:
         frst_close = False
@@ -1698,6 +1715,7 @@ try:
             "FRST": get_floor_request("FRST"),
             "APT": get_floor_request("APT"),
         }
+        update_post_cool_modes(floor_requests)
         update_floor_diagnostics(floor_requests, cooler_available)
 
         frst_heat_allowed, apt_heat_allowed = apply_heating_logic()
