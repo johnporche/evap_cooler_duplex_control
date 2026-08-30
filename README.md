@@ -154,6 +154,15 @@ running:
 0 10 * * * /usr/bin/flock -n /tmp/hvac-reports.lock /usr/bin/nice -n 15 /home/pi/evap_cooler_duplex_control/scripts/generate_scheduled_reports.sh >> /home/pi/evap_cooler_duplex_control/log/reports-cron.log 2>&1
 ```
 
+At 11:00 UTC, a second job compresses and verifies completed state and event
+archives and creates compact state summaries. It uses the same lock, so it
+cannot overlap report generation. The command deliberately omits `--prune`;
+active logs and historical compressed archives are retained:
+
+```cron
+0 11 * * * /usr/bin/flock -n /tmp/hvac-reports.lock /usr/bin/nice -n 15 /home/pi/evap_cooler_duplex_control/scripts/maintain_report_archives.sh >> /home/pi/evap_cooler_duplex_control/log/maintenance-cron.log 2>&1
+```
+
 ## Adaptive prewet
 
 Prewet selection is isolated in `hvac_prewet.py` and covered by unit tests. The
