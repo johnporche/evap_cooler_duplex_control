@@ -114,6 +114,30 @@ On the Revolution Pi, install a TeX distribution only if PDFs must be built on
 the controller. A lighter and safer arrangement is to generate or copy reports
 on another machine while the RevPi only records CSV data.
 
+### Automatic report copy to macOS
+
+`scripts/sync_reports_from_revpi.sh` pulls the RevPi `reports/` tree into the
+local repository. The included LaunchAgent starts at login and at 03:00 each
+day, then `wait_until_sunrise.py` waits for sunrise at the configured Denver
+site before syncing. If the Mac is asleep, macOS starts the job after wake and
+the already-passed sunrise causes the copy to proceed immediately:
+
+```bash
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs" \
+  "$HOME/Library/Application Support/HVACController"
+install -m 0755 scripts/sync_reports_from_revpi.sh \
+  "$HOME/Library/Application Support/HVACController/"
+install -m 0755 scripts/wait_until_sunrise.py \
+  "$HOME/Library/Application Support/HVACController/"
+cp launchd/com.johnporche.hvac-report-sync.plist "$HOME/Library/LaunchAgents/"
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.johnporche.hvac-report-sync.plist"
+```
+
+The sync deliberately omits `--delete`, so a report removed from the RevPi is
+not automatically removed from the Mac archive. SSH key authentication must be
+configured because the background job cannot answer a password prompt.
+
 ## Adaptive prewet
 
 Prewet selection is isolated in `hvac_prewet.py` and covered by unit tests. The
@@ -175,6 +199,15 @@ off while leaving both zone dampers open. Faults are reported but are not
 automatically reset. The pulse timing constants are configurable near the top
 of `hvac_control.py`; validate them against a captured real fault waveform for
 the installed cooler model.
+
+Zone diagnostics distinguish the thermostat request from the mode the
+controller can actually provide. Event messages report changes in the form
+`COOL->COOL_BLOCKED reason=MS1_STARTUP_UNKNOWN`. The state CSV retains the
+legacy `frst_mode` and `apt_mode` fields and also records
+`*_requested_mode`, `*_effective_mode`, and `*_mode_reason`. Stable reasons
+include MS1 startup, offline, and fault conditions; warm-weather heat
+shutdown; low-OAT free cooling; rejected standalone fan calls; and conflicting
+heat/cool inputs.
 
 Boiler availability is independent and follows the existing 70 F on / 65 F
 reset warm-weather shutdown. Evaporative pump operation has separate low-OAT

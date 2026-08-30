@@ -17,6 +17,7 @@ from hvac_airflow import (
     select_zone_airflow,
 )
 from hvac_log_manager import RotatingCsvLog, RotatingTextLog
+from hvac_modes import describe_zone_mode
 from hvac_ms1 import MS1Decoder, next_low_oat_lockout
 from hvac_prewet import select_prewet
 
@@ -240,6 +241,19 @@ cooler_low_oat_lockout = None
 floor_modes = {
     "FRST": "OFF",
     "APT": "OFF",
+}
+
+floor_diagnostics = {
+    "FRST": {
+        "requested_mode": "OFF",
+        "effective_mode": "OFF",
+        "reason": "NONE",
+    },
+    "APT": {
+        "requested_mode": "OFF",
+        "effective_mode": "OFF",
+        "reason": "NONE",
+    },
 }
 
 last_calls = {
@@ -1052,31 +1066,52 @@ def update_post_cool_modes(floor_requests):
         )
 
 
-def update_floor_diagnostics(floor_requests, cooler_available):
-    old_modes = floor_modes.copy()
+def _format_floor_diagnostic(diagnostic):
+    requested = diagnostic["requested_mode"]
+    effective = diagnostic["effective_mode"]
+    reason = diagnostic["reason"]
+    if requested == effective and reason == "NONE":
+        return effective
+    return requested + "->" + effective + " reason=" + reason
+
+
+def update_floor_diagnostics(floor_requests, oat_f):
+    old_diagnostics = {
+        prefix: diagnostic.copy()
+        for prefix, diagnostic in floor_diagnostics.items()
+    }
     for prefix in ("FRST", "APT"):
         request = floor_requests[prefix]
         if request["heat"]:
             last_calls[prefix] = "HEAT"
-            mode = "HEAT"
         elif request["cool"]:
             last_calls[prefix] = "COOL"
-            if not cooler_available:
-                mode = "COOL_BLOCKED"
-            elif cooler_low_oat_lockout:
-                mode = "FREE_COOL"
-            else:
-                mode = "COOL"
-        elif post_cool_active[prefix]:
-            mode = "VENT" if cooler_available else "OFF"
-        else:
-            mode = "OFF"
-        floor_modes[prefix] = mode
 
-    if floor_modes != old_modes:
+        requested, effective, reason = describe_zone_mode(
+            heat=request["heat"],
+            cool=request["cool"],
+            fan=request["fan"],
+            post_cool_active=post_cool_active[prefix],
+            warm_weather_shutdown=bool(warm_weather_shutdown),
+            cooler_state=ms1_status.state,
+            cooler_fault_code=ms1_status.fault_code,
+            low_oat_lockout=bool(cooler_low_oat_lockout),
+            oat_known=oat_f is not None,
+        )
+        floor_diagnostics[prefix] = {
+            "requested_mode": requested,
+            "effective_mode": effective,
+            "reason": reason,
+        }
+        # Retain the legacy field for existing reports and log readers.
+        floor_modes[prefix] = effective
+
+    if floor_diagnostics != old_diagnostics:
         console_event(
-            "Request mode | 1st=" + floor_modes["FRST"]
-            + " | apt=" + floor_modes["APT"]
+            "Request mode | 1st="
+            + _format_floor_diagnostic(floor_diagnostics["FRST"])
+            + " | apt="
+            + _format_floor_diagnostic(floor_diagnostics["APT"])
         )
 
 
@@ -1593,6 +1628,11 @@ def get_state_snapshot(extra):
 
     row["frst_mode"] = floor_modes["FRST"]
     row["apt_mode"] = floor_modes["APT"]
+    for prefix, field_prefix in (("FRST", "frst"), ("APT", "apt")):
+        diagnostic = floor_diagnostics[prefix]
+        row[field_prefix + "_requested_mode"] = diagnostic["requested_mode"]
+        row[field_prefix + "_effective_mode"] = diagnostic["effective_mode"]
+        row[field_prefix + "_mode_reason"] = diagnostic["reason"]
     row["frst_last_call"] = last_calls["FRST"] if last_calls["FRST"] else ""
     row["apt_last_call"] = last_calls["APT"] if last_calls["APT"] else ""
 
@@ -1716,7 +1756,7 @@ try:
             "APT": get_floor_request("APT"),
         }
         update_post_cool_modes(floor_requests)
-        update_floor_diagnostics(floor_requests, cooler_available)
+        update_floor_diagnostics(floor_requests, oat_calibrated_f)
 
         frst_heat_allowed, apt_heat_allowed = apply_heating_logic()
 

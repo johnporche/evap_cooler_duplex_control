@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.johnporche.hvac-report-sync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/jporche/Library/Application Support/HVACController/sync_reports_from_revpi.sh</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>3</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/jporche/Library/Logs/hvac-report-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jporche/Library/Logs/hvac-report-sync.error.log</string>
+</dict>
+</plist>
