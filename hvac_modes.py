@@ -54,8 +54,6 @@ def describe_zone_mode(
 
     if fan:
         requested = "VENT"
-        if not post_cool_active:
-            return requested, "OFF", "FAN_ONLY_NOT_POST_COOL"
         if cooler_state != "READY":
             return (
                 requested,

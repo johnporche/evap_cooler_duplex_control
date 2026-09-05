@@ -180,28 +180,26 @@ promoted from 15 to 60 seconds, not all the way to the dry-pad 90-second
 duration. Damper preparation remains independent; the fan starts only when
 both prewet and any required damper-settle interval are complete.
 
-## Post-cooling fan operation and zone priority
+## Ventilation, post-cooling fan operation, and zone priority
 
-The controller recognizes post-cooling fan operation from the thermostat
-signal sequence, not from a remembered historical call. A zone enters `VENT`
-only when its `COOL` input changes from on to off while one of its fan-stage
-inputs remains on. The zone stays in `VENT` while that fan signal remains on,
-up to the 15-minute ventilation safety limit. A standalone fan request at
-controller startup or later in an idle period is not treated as post-cooling
-operation.
+The controller honors a standalone thermostat fan-stage request as `VENT` and
+also recognizes post-cooling fan operation when `COOL` changes from on to off
+while a fan-stage input remains on. In either case, the cooler system and fan
+run with the pump off, and ventilation is limited to fan speed 2 and the
+15-minute ventilation safety limit.
 
 Heating always cancels post-cooling state. Fan-stage inputs that accompany a
 `HEAT` call are ignored by the evaporative-cooler airflow logic because the
 cooler fan is not available for heating.
 
-Wet cooling has priority over post-cooling ventilation when the zones differ:
+Wet cooling has priority over ventilation when the zones differ:
 
-- If one zone is cooling and the other is only in post-cooling `VENT`, the
-  cooling zone's damper opens and the post-cooling zone's damper closes.
+- If one zone is cooling and the other is in `VENT`, the
+  cooling zone's damper opens and the venting zone's damper closes.
 - If both zones are cooling, both dampers open.
-- If neither zone is cooling and both are in valid post-cooling `VENT`, both
+- If neither zone is cooling and both are in `VENT`, both
   dampers open.
-- If only one zone is in valid post-cooling `VENT`, its damper opens and the
+- If only one zone is in `VENT`, its damper opens and the
   inactive zone's damper closes.
 
 When cooling takes over from `VENT` and requires a damper to close, the fan is

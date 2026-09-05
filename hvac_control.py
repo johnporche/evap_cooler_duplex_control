@@ -1161,27 +1161,27 @@ def apply_airflow_damper_logic(floor_requests, cooler_available):
         apt_request["cool"] and cooler_available and cooler_low_oat_lockout
     )
 
-    # A fan request without heat or cool is honored only when a COOL falling
-    # edge established an active post-cool state for that zone. Standalone
-    # fan calls and all fan-stage inputs during heat are ignored.
+    # A fan request without heat or cool is a valid ventilation request.
+    # Post-cooling fan operation uses the same airflow path. Fan-stage inputs
+    # during heat remain ignored because get_floor_request selects HEAT first.
     frst_vent_allowed = (
         cooler_available
         and (
             frst_cool_to_vent
-            or (frst_request["mode"] == "VENT" and post_cool_active["FRST"])
+            or frst_request["mode"] == "VENT"
         )
     )
     apt_vent_allowed = (
         cooler_available
         and (
             apt_cool_to_vent
-            or (apt_request["mode"] == "VENT" and post_cool_active["APT"])
+            or apt_request["mode"] == "VENT"
         )
     )
 
-    # Wet cooling takes priority over post-cooling fan-only operation. A zone
-    # that is only ventilating is suppressed while the other zone cools. If
-    # neither zone is cooling, one or both valid fan-only requests are honored.
+    # Wet cooling takes priority over all fan-only operation. A zone that is
+    # only ventilating is suppressed while the other zone cools. If neither
+    # zone is cooling, one or both valid fan-only requests are honored.
     frst_air_allowed, apt_air_allowed = select_zone_airflow(
         frst_cool_allowed,
         apt_cool_allowed,

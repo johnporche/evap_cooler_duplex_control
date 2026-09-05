@@ -65,10 +65,22 @@ class ZoneModeDiagnosticTests(unittest.TestCase):
             ("HEAT", "HEAT", "INPUT_CONFLICT_HEAT_PRIORITY"),
         )
 
-    def test_manual_fan_call_explains_rejection(self):
+    def test_manual_fan_call_is_valid_ventilation(self):
         self.assertEqual(
             describe(fan=True),
-            ("VENT", "OFF", "FAN_ONLY_NOT_POST_COOL"),
+            ("VENT", "VENT", "NONE"),
+        )
+
+    def test_manual_fan_call_reports_ms1_block(self):
+        self.assertEqual(
+            describe(fan=True, cooler_state="OFFLINE"),
+            ("VENT", "VENT_BLOCKED", "MS1_OFFLINE"),
+        )
+
+    def test_heat_ignores_accompanying_fan_input(self):
+        self.assertEqual(
+            describe(heat=True, fan=True),
+            ("HEAT", "HEAT", "NONE"),
         )
 
     def test_post_cool_vent_is_allowed(self):
