@@ -20,9 +20,10 @@ def main():
     try:
         for name in SAFE_OUTPUTS:
             rpi.io[name].value = 0
-        # This oddly named LED channel drives an active-low boiler-panel
-        # interlock. A process-image value of 0 blocks auxiliary thermostats.
-        rpi.io.T_RevPiLED_WWSD.value = 0
+        # X2 REL is bit 6 of the RevPiLED byte. Clear only that bit to close the
+        # contact and block auxiliary thermostats, preserving unrelated bits.
+        current = int(rpi.io.T_RevPiLED_WWSD.value)
+        rpi.io.T_RevPiLED_WWSD.value = current & ~(1 << 6)
         if not rpi.writeprocimg():
             raise RuntimeError("failed to write one or more safe outputs")
     finally:

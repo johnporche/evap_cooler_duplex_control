@@ -10,10 +10,11 @@ NUMERIC_FIELDS = {
     "fan_target_speed", "fan_actual_speed", "fan_current_volts",
     "ERROR_IN", "ms1_status_raw", "ms1_status_volts", "ms1_fault_code",
     "ms1_last_high_age_seconds", "ms1_last_transition_age_seconds",
+    "WWSD", "wwsd_relay_bit_6",
 }
 BOOLEAN_FIELDS = {
     "FRST_HEAT", "APT_HEAT", "FRST_COOL", "APT_COOL",
-    "FRST_BOILER", "APT_BOILER", "WWSD",
+    "FRST_BOILER", "APT_BOILER", "boiler_panel_contact_open",
     "frst_heat_allowed", "apt_heat_allowed", "main_heat_mode_latched",
     "boiler_panel_interlock_blocked",
     "cooling_requested", "cooling_active",
@@ -27,6 +28,7 @@ BOOLEAN_FIELDS = {
 }
 OPTIONAL_BOOLEAN_FIELDS = {
     "main_heat_mode_latched", "boiler_panel_interlock_blocked",
+    "boiler_panel_contact_open",
 }
 
 

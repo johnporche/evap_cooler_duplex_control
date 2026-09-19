@@ -26,9 +26,11 @@ def describe(**overrides):
 
 
 class ZoneModeDiagnosticTests(unittest.TestCase):
-    def test_boiler_interlock_output_is_active_low(self):
-        self.assertEqual(boiler_panel_interlock_output(True), 0)
-        self.assertEqual(boiler_panel_interlock_output(False), 1)
+    def test_boiler_interlock_output_opens_contact_to_enable(self):
+        self.assertEqual(boiler_panel_interlock_output(0, True), 0)
+        self.assertEqual(boiler_panel_interlock_output(0, False), 64)
+        self.assertEqual(boiler_panel_interlock_output(0b10101111, True), 0b10101111 & ~64)
+        self.assertEqual(boiler_panel_interlock_output(0b00101111, False), 0b00101111 | 64)
 
     def test_wwsd_startup_uses_trip_threshold_not_reset_threshold(self):
         self.assertFalse(initial_wwsd_state(65.1, 70.0))

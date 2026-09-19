@@ -250,8 +250,10 @@ OAT fails pump-safe. The old remembered per-floor OAT mode no longer gates
 thermostat calls, preventing cool morning calls from becoming stuck in IDLE.
 
 `T_RevPiLED_WWSD` also drives the boiler-panel thermostat interlock despite its
-PiCtory LED name. The field wiring is active-low: process-image value 0
-energizes the blocking relay, and value 1 releases it. The interlock starts
+PiCtory LED name. The X2 relay is controlled by bit 6 of the
+`RevPiLED` byte: setting bit 6 opens the contact and enables the auxiliary
+thermostats; clearing bit 6 closes the contact and blocks them. The
+controller preserves the byte's unrelated LED bits. The interlock starts
 blocked, is enabled when a main-floor heat call establishes the latched HEAT
 mode, and is blocked again by a later main-floor cooling call or by WWSD. Ending
 an individual heat call does not clear the latched HEAT mode.

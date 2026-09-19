@@ -156,6 +156,7 @@ MAX_VENT_SECONDS = 15 * 60
 # WWSD turns on at 70 F and stays on until OAT drops to 65 F.
 WWSD_ON_TEMP_F = 70.0
 WWSD_OFF_TEMP_F = 65.0
+WWSD_RELAY_BIT = 6
 
 # Evaporative cooling low-OAT hysteresis. Below the disable threshold, a
 # cooling call becomes fan-only/free cooling while the MS1 is available.
@@ -234,10 +235,15 @@ outputs = {
     "WWSD": rpi.io.T_RevPiLED_WWSD,
 }
 
-# T_RevPiLED_WWSD drives an active-low boiler-panel interlock: process-image
-# value 0 energizes the blocking relay, while 1 releases it. Establish the
-# blocked state immediately rather than waiting for the first loop.
-outputs["WWSD"].value = 0
+# T_RevPiLED_WWSD aliases the RevPiLED byte. X2 REL is controlled by bit 6:
+# setting bit 6 opens the contact and enables auxiliary thermostats; clearing
+# it closes the contact and blocks the boiler enable circuit. Preserve unrelated
+# LED bits while establishing the blocked startup state.
+outputs["WWSD"].value = boiler_panel_interlock_output(
+    outputs["WWSD"].value,
+    True,
+    WWSD_RELAY_BIT,
+)
 
 
 # ============================================================
@@ -1049,7 +1055,7 @@ def update_wwsd(oat_calibrated_f):
 
 
 def update_boiler_panel_interlock():
-    """Drive the active-low boiler-panel thermostat block relay."""
+    """Drive the X2 boiler-panel thermostat enable contact."""
     global boiler_interlock_blocked
 
     old = boiler_interlock_blocked
@@ -1058,7 +1064,9 @@ def update_boiler_panel_interlock():
         warm_weather_shutdown,
     )
     outputs["WWSD"].value = boiler_panel_interlock_output(
-        boiler_interlock_blocked
+        outputs["WWSD"].value,
+        boiler_interlock_blocked,
+        WWSD_RELAY_BIT,
     )
 
     if old is not None and boiler_interlock_blocked != old:
@@ -1677,6 +1685,14 @@ def get_state_snapshot(extra):
     row["wwsd_off_temp_f"] = WWSD_OFF_TEMP_F
     row["main_heat_mode_latched"] = last_calls["FRST"] == "HEAT"
     row["boiler_panel_interlock_blocked"] = boiler_interlock_blocked
+    row["wwsd_relay_bit_6"] = (
+        int(outputs["WWSD"].value) >> WWSD_RELAY_BIT
+    ) & 1
+    row["boiler_panel_contact_open"] = (
+        None
+        if boiler_interlock_blocked is None
+        else not boiler_interlock_blocked
+    )
     row["cooler_low_oat_lockout"] = cooler_low_oat_lockout
     row["cool_pump_enable_oat_f"] = COOL_PUMP_ENABLE_OAT_F
     row["cool_pump_disable_oat_f"] = COOL_PUMP_DISABLE_OAT_F
@@ -2042,8 +2058,12 @@ finally:
     outputs["FRST_BOILER"].value = 0
     outputs["APT_BOILER"].value = 0
 
-    # Active-low boiler-panel interlock: 0 leaves auxiliary heat blocked.
-    outputs["WWSD"].value = 0
+    # Clear bit 6 to close the contact, leaving auxiliary heat blocked.
+    outputs["WWSD"].value = boiler_panel_interlock_output(
+        outputs["WWSD"].value,
+        True,
+        WWSD_RELAY_BIT,
+    )
 
     console_event("Controller exiting. Fan off, BMS off, boilers off, dampers open.")
     #rpi.close()
