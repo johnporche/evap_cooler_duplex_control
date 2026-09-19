@@ -1,6 +1,7 @@
 import unittest
 
 from hvac_modes import (
+    boiler_panel_interlock_output,
     boiler_panel_interlock_should_block,
     describe_zone_mode,
     initial_wwsd_state,
@@ -25,6 +26,10 @@ def describe(**overrides):
 
 
 class ZoneModeDiagnosticTests(unittest.TestCase):
+    def test_boiler_interlock_output_is_active_low(self):
+        self.assertEqual(boiler_panel_interlock_output(True), 0)
+        self.assertEqual(boiler_panel_interlock_output(False), 1)
+
     def test_wwsd_startup_uses_trip_threshold_not_reset_threshold(self):
         self.assertFalse(initial_wwsd_state(65.1, 70.0))
         self.assertFalse(initial_wwsd_state(69.9, 70.0))

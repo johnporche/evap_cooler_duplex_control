@@ -19,6 +19,7 @@ from hvac_airflow import (
 )
 from hvac_log_manager import RotatingCsvLog, RotatingTextLog
 from hvac_modes import (
+    boiler_panel_interlock_output,
     boiler_panel_interlock_should_block,
     describe_zone_mode,
     initial_wwsd_state,
@@ -233,9 +234,10 @@ outputs = {
     "WWSD": rpi.io.T_RevPiLED_WWSD,
 }
 
-# T_RevPiLED_WWSD drives the boiler-panel interlock. Energized means blocked;
-# establish the safe state immediately rather than waiting for the first loop.
-outputs["WWSD"].value = 1
+# T_RevPiLED_WWSD drives an active-low boiler-panel interlock: process-image
+# value 0 energizes the blocking relay, while 1 releases it. Establish the
+# blocked state immediately rather than waiting for the first loop.
+outputs["WWSD"].value = 0
 
 
 # ============================================================
@@ -1047,7 +1049,7 @@ def update_wwsd(oat_calibrated_f):
 
 
 def update_boiler_panel_interlock():
-    """Drive the boiler-panel thermostat block relay (1 means blocked)."""
+    """Drive the active-low boiler-panel thermostat block relay."""
     global boiler_interlock_blocked
 
     old = boiler_interlock_blocked
@@ -1055,7 +1057,9 @@ def update_boiler_panel_interlock():
         last_calls["FRST"],
         warm_weather_shutdown,
     )
-    outputs["WWSD"].value = 1 if boiler_interlock_blocked else 0
+    outputs["WWSD"].value = boiler_panel_interlock_output(
+        boiler_interlock_blocked
+    )
 
     if old is not None and boiler_interlock_blocked != old:
         if boiler_interlock_blocked:
@@ -2038,8 +2042,8 @@ finally:
     outputs["FRST_BOILER"].value = 0
     outputs["APT_BOILER"].value = 0
 
-    # T_RevPiLED_WWSD drives the boiler-panel interlock; 1 means blocked.
-    outputs["WWSD"].value = 1
+    # Active-low boiler-panel interlock: 0 leaves auxiliary heat blocked.
+    outputs["WWSD"].value = 0
 
     console_event("Controller exiting. Fan off, BMS off, boilers off, dampers open.")
     #rpi.close()
