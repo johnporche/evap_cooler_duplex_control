@@ -14,12 +14,23 @@ def ms1_inhibition_reason(state, fault_code=None):
     return "MS1_" + str(state or "UNKNOWN")
 
 
+def boiler_panel_interlock_should_block(main_last_call, warm_weather_shutdown):
+    """Return True when the auxiliary boiler thermostats must be blocked.
+
+    A main-floor heat call establishes a latched heating mode. A later cooling
+    call clears it. Unknown startup state and WWSD are fail-safe blocking
+    conditions.
+    """
+    return main_last_call != "HEAT" or warm_weather_shutdown is not False
+
+
 def describe_zone_mode(
     *,
     heat,
     cool,
     fan,
     post_cool_active,
+    post_heat_fan_suppressed=False,
     warm_weather_shutdown,
     cooler_state,
     cooler_fault_code=None,
@@ -54,6 +65,8 @@ def describe_zone_mode(
 
     if fan:
         requested = "VENT"
+        if post_heat_fan_suppressed:
+            return requested, "OFF", "POST_HEAT_FAN_SUPPRESSED"
         if cooler_state != "READY":
             return (
                 requested,

@@ -18,7 +18,7 @@ def write_latex(path, config, period, metrics):
     v = metrics.values
     ms1_ready = "--" if v["ms1_ready_percent"] is None else f"{v['ms1_ready_percent'] * 100:.1f}\\%"
     state_rows = "\n".join(f"{_escape(key)} & {hours:.2f} \\\\" for key, hours in metrics.state_hours.items()) or r"No observed state data & 0.00 \\"
-    daily_rows = "\n".join(f"{row['date']} & {row['observed_hours']:.2f} & {row['cooling_hours']:.2f} & {row['vent_hours']:.2f} \\\\" for row in metrics.daily_rows) or r"No observed days & 0 & 0 & 0 \\"
+    daily_rows = "\n".join(f"{row['date']} & {row['observed_hours']:.2f} & {row['cooling_hours']:.2f} & {row['vent_hours']:.2f} & {row['main_heat_hours']:.2f} & {row['apartment_heat_hours']:.2f} \\\\" for row in metrics.daily_rows) or r"No observed days & 0 & 0 & 0 & 0 & 0 \\"
     status = "COMPLETE" if v["coverage"] >= 0.98 else "INCOMPLETE DATA"
     color = "ReportTeal" if status == "COMPLETE" else "ReportRed"
     document = rf"""\documentclass[10pt]{{article}}
@@ -50,6 +50,8 @@ Observed: {v['observed_hours']:.2f} of {v['period_hours']:.2f} hours ({v['covera
 \end{{tabularx}}
 
 \vspace{{10pt}}\input{{charts/fan.tex}}\par
+\newpage
+\input{{charts/heat.tex}}\par
 \vspace{{8pt}}\input{{charts/temperatures.tex}}\par
 
 \newpage
@@ -67,10 +69,15 @@ Static-pressure input OK & {v['static_pressure_ok_percent'] * 100:.1f}\% of samp
 MS1 ready & {ms1_ready}\\
 MS1 fault samples & {v['ms1_fault_samples']}\\
 MS1 offline samples & {v['ms1_offline_samples']}\\
+Main heat calls & {v['main_heat_calls']}\\
+Apartment heat calls & {v['apartment_heat_calls']}\\
+Main boiler output & {v['main_heat_hours']:.2f} h\\
+Apartment boiler output & {v['apartment_heat_hours']:.2f} h\\
+Auxiliary heat enabled & {v['auxiliary_heat_enable_hours']:.2f} h\\
 \bottomrule\end{{tabular}}
 
 \section*{{Daily aggregation}}
-\begin{{tabular}}{{lrrr}}\toprule Date & Observed h & Cooling h & Vent h\\\midrule
+\begin{{tabular}}{{lrrrrr}}\toprule Date & Observed h & Cooling h & Vent h & Main heat h & Apt heat h\\\midrule
 {daily_rows}
 \bottomrule\end{{tabular}}
 

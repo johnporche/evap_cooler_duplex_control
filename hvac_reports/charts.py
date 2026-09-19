@@ -44,6 +44,18 @@ def _demand_series(rows, period, field):
     return points
 
 
+def _binary_series(rows, period, field, invert=False):
+    points = []
+    for row in _sample(rows):
+        hour = (row["timestamp"] - period.start).total_seconds() / 3600.0
+        value = row.get(field)
+        if value is None:
+            continue
+        value = bool(value)
+        points.append((hour, float(not value if invert else value)))
+    return points
+
+
 def _intervals_when(rows, period, predicate, maximum_gap_seconds=60.0):
     intervals = []
     start = None
@@ -205,15 +217,17 @@ def pgf_line_chart(path, title, series, x_range, y_range, y_label, height="0.30"
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def svg_stacked_chart(path, title, panels, x_range, markers=None):
-    width, height = 1100, 610
+def svg_stacked_chart(path, title, panels, x_range, markers=None, scale_note="Demand scale: 0=OFF, 1=LOW, 2=MED, 3=HIGH"):
+    width = 1100
     x0, plot_w, panel_h, gap = 85, 970, 125, 32
+    panel_count = len(panels)
+    height = 55 + panel_count * (panel_h + gap) - gap + 70
     elements = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
                 '<rect width="100%" height="100%" fill="white"/>',
                 f'<text x="{x0}" y="28" font-family="sans-serif" font-size="20" font-weight="700" fill="{COLORS["navy"]}">{escape(title)}</text>']
     xmin, xmax = x_range
     plot_top = 55
-    plot_bottom = 55 + 3 * (panel_h + gap) - gap
+    plot_bottom = 55 + panel_count * (panel_h + gap) - gap
     for label, hour, clock, marker_color in markers or []:
         x = x0 + (hour - xmin) / (xmax - xmin) * plot_w
         elements += [
@@ -223,34 +237,36 @@ def svg_stacked_chart(path, title, panels, x_range, markers=None):
     for panel_index, (label, points, y_range, color) in enumerate(panels):
         y0 = 55 + panel_index * (panel_h + gap)
         ymin, ymax = y_range
-        for i in range(4):
-            y = y0 + panel_h * i / 3
-            value = ymax - (ymax - ymin) * i / 3
+        tick_count = 2 if ymax - ymin <= 1.1 else 4
+        for i in range(tick_count):
+            y = y0 + panel_h * i / (tick_count - 1)
+            value = ymax - (ymax - ymin) * i / (tick_count - 1)
             elements += [f'<line x1="{x0}" y1="{y:.1f}" x2="{x0+plot_w}" y2="{y:.1f}" stroke="#D8E1E8"/>',
                          f'<text x="{x0-8}" y="{y+4:.1f}" text-anchor="end" font-family="sans-serif" font-size="11" fill="{COLORS["gray"]}">{value:.0f}</text>']
         d = _path(points, x0, y0, plot_w, panel_h, xmin, xmax, ymin, ymax)
         elements += [f'<path d="{d}" fill="none" stroke="{color}" stroke-width="2"/>',
                      f'<text x="12" y="{y0+panel_h/2}" transform="rotate(-90 12 {y0+panel_h/2})" text-anchor="middle" font-family="sans-serif" font-size="12">{escape(label)}</text>']
-    axis_y = 55 + 3 * (panel_h + gap) - gap
+    axis_y = plot_bottom
     for i in range(7):
         x = x0 + plot_w * i / 6
         value = xmin + (xmax - xmin) * i / 6
         elements.append(f'<text x="{x:.1f}" y="{axis_y+28}" text-anchor="middle" font-family="sans-serif" font-size="11" fill="{COLORS["gray"]}">{value:.0f}h</text>')
     elements += [f'<text x="{x0+plot_w/2}" y="{axis_y+50}" text-anchor="middle" font-family="sans-serif" font-size="12">Hours from report start</text>',
-                 f'<text x="{x0}" y="{height-12}" font-family="sans-serif" font-size="11" fill="{COLORS["gray"]}">Demand scale: 0=OFF, 1=LOW, 2=MED, 3=HIGH</text>', '</svg>']
+                 f'<text x="{x0}" y="{height-12}" font-family="sans-serif" font-size="11" fill="{COLORS["gray"]}">{escape(scale_note)}</text>', '</svg>']
     Path(path).write_text("\n".join(elements), encoding="utf-8")
 
 
-def pgf_stacked_chart(path, title, panels, x_range, markers=None):
+def pgf_stacked_chart(path, title, panels, x_range, markers=None, scale_note="Demand scale: 0=OFF, 1=LOW, 2=MED, 3=HIGH"):
     xmin, xmax = x_range
     lines = [f"\\begin{{center}}\\textbf{{{title}}}\\end{{center}}"]
     for index, (label, points, y_range, color) in enumerate(panels):
         ymin, ymax = y_range
         xlabel = "xlabel={Hours from report start}," if index == len(panels) - 1 else "xticklabels={},"
+        yticks = "ytick={0,1}," if ymax - ymin <= 1.1 else ""
         coords = " ".join(f"({x:.4f},{y:.4f})" for x, y in points)
         latex_color = ["ReportBlue", "ReportOrange", "ReportTeal"][index % 3]
         lines += [r"\begin{tikzpicture}",
-                  rf"\begin{{axis}}[width=\textwidth,height=0.145\textheight,grid=major,ylabel={{{label}}},{xlabel}xmin={xmin:.3f},xmax={xmax:.3f},ymin={ymin:.3f},ymax={ymax:.3f},tick label style={{font=\small}}]",
+                  rf"\begin{{axis}}[width=\textwidth,height=0.145\textheight,grid=major,ylabel={{{label}}},{xlabel}{yticks}xmin={xmin:.3f},xmax={xmax:.3f},ymin={ymin:.3f},ymax={ymax:.3f},tick label style={{font=\small}}]",
                   f"\\addplot+[no marks,thick,color={latex_color}] coordinates {{{coords}}};"]
         for marker_label, hour, clock, _ in markers or []:
             marker_node = (
@@ -263,7 +279,7 @@ def pgf_stacked_chart(path, title, panels, x_range, markers=None):
                 f"{marker_node} (axis cs:{hour:.4f},{ymax:.4f});"
             )
         lines += [r"\end{axis}", r"\end{tikzpicture}\par"]
-    lines.append(r"\small Demand scale: 0=OFF, 1=LOW, 2=MED, 3=HIGH.")
+    lines.append("\\small " + scale_note.replace("_", r"\_") + ".")
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -276,6 +292,13 @@ def generate_charts(rows, period, output_dir, include_pgf=True):
         ("Main thermostat demand", _demand_series(rows, period, "frst_demand_level"), (0, 3), COLORS["blue"]),
         ("Apartment thermostat demand", _demand_series(rows, period, "apt_demand_level"), (0, 3), COLORS["orange"]),
         ("Actual fan speed", _series(rows, period, "fan_actual_speed"), (0, 10), COLORS["teal"]),
+    ]
+    heat_panels = [
+        ("Main heat request", _binary_series(rows, period, "FRST_HEAT"), (0, 1), COLORS["blue"]),
+        ("Main boiler output", _binary_series(rows, period, "FRST_BOILER"), (0, 1), COLORS["teal"]),
+        ("Apartment heat request", _binary_series(rows, period, "APT_HEAT"), (0, 1), COLORS["orange"]),
+        ("Apartment boiler output", _binary_series(rows, period, "APT_BOILER"), (0, 1), COLORS["red"]),
+        ("Aux thermostats enabled", _binary_series(rows, period, "boiler_panel_interlock_blocked", invert=True), (0, 1), COLORS["navy"]),
     ]
     temp_series = [
         ("Outdoor", _series(rows, period, "oat_calibrated_boiler_f"), COLORS["blue"]),
@@ -307,6 +330,7 @@ def generate_charts(rows, period, output_dir, include_pgf=True):
         if obsolete_path.exists():
             obsolete_path.unlink()
     svg_stacked_chart(chart_dir / "fan.svg", "Thermostat demands and actual fan response", fan_panels, (0, hours), markers=solar_markers)
+    svg_stacked_chart(chart_dir / "heat.svg", "Heating requests, outputs, and boiler-panel enable", heat_panels, (0, hours), markers=solar_markers, scale_note="Binary scale: 0=OFF/BLOCKED, 1=ON/ENABLED")
     svg_line_chart(chart_dir / "temperatures.svg", "Outdoor and supply temperatures", temp_series, (0, hours), (temp_min, temp_max), "Degrees F", markers=solar_markers)
     svg_line_chart(chart_dir / "main_zone_delivery.svg", "Main-floor supply delta and damper state", main_zone_series, (0, hours), (delta_min, delta_max), "Delta F", band_layers=[
         (main_idle_open, COLORS["gray"], 0.10, "Open, no zone request"),
@@ -318,6 +342,7 @@ def generate_charts(rows, period, output_dir, include_pgf=True):
     ], markers=solar_markers)
     if include_pgf:
         pgf_stacked_chart(chart_dir / "fan.tex", "Thermostat demands and actual fan response", fan_panels, (0, hours), markers=solar_markers)
+        pgf_stacked_chart(chart_dir / "heat.tex", "Heating requests, outputs, and boiler-panel enable", heat_panels, (0, hours), markers=solar_markers, scale_note="Binary scale: 0=OFF/BLOCKED, 1=ON/ENABLED")
         pgf_line_chart(chart_dir / "temperatures.tex", "Outdoor and supply temperatures", temp_series, (0, hours), (temp_min, temp_max), "Degrees F", markers=solar_markers)
         pgf_line_chart(chart_dir / "main_zone_delivery.tex", "Main-floor supply delta and damper state", main_zone_series, (0, hours), (delta_min, delta_max), "Delta F", "0.22", band_layers=[
             (main_idle_open, "ReportGray", 0.10),

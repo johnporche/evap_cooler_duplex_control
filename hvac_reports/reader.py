@@ -12,7 +12,11 @@ NUMERIC_FIELDS = {
     "ms1_last_high_age_seconds", "ms1_last_transition_age_seconds",
 }
 BOOLEAN_FIELDS = {
-    "FRST_COOL", "APT_COOL", "cooling_requested", "cooling_active",
+    "FRST_HEAT", "APT_HEAT", "FRST_COOL", "APT_COOL",
+    "FRST_BOILER", "APT_BOILER", "WWSD",
+    "frst_heat_allowed", "apt_heat_allowed", "main_heat_mode_latched",
+    "boiler_panel_interlock_blocked",
+    "cooling_requested", "cooling_active",
     "vent_requested", "vent_active", "STATIC_PRESSURE",
     "FRST_DMP_CLOSE", "APT_DMP_CLOSE",
     "frst_cool_allowed", "apt_cool_allowed",
@@ -20,6 +24,9 @@ BOOLEAN_FIELDS = {
     "frst_air_allowed", "apt_air_allowed", "airflow_requested",
     "cooler_available", "cooler_low_oat_lockout", "ms1_power_available",
     "ms1_fault_active", "frst_cool_to_vent", "apt_cool_to_vent",
+}
+OPTIONAL_BOOLEAN_FIELDS = {
+    "main_heat_mode_latched", "boiler_panel_interlock_blocked",
 }
 
 
@@ -72,7 +79,12 @@ def read_rows(paths, period):
                 for field in NUMERIC_FIELDS:
                     parsed[field] = _number(row.get(field))
                 for field in BOOLEAN_FIELDS:
-                    parsed[field] = _boolean(row.get(field))
+                    value = row.get(field)
+                    parsed[field] = (
+                        None
+                        if field in OPTIONAL_BOOLEAN_FIELDS and value in (None, "")
+                        else _boolean(value)
+                    )
                 rows.append(parsed)
     rows.sort(key=lambda item: item["timestamp"])
     deduplicated = []

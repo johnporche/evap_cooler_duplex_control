@@ -12,7 +12,6 @@ SAFE_OUTPUTS = (
     "T_R2_APT_DMP_CLOSE",
     "T_R3_FRST_BOILER",
     "T_R4_APT_BOILER",
-    "T_RevPiLED_WWSD",
 )
 
 
@@ -21,6 +20,9 @@ def main():
     try:
         for name in SAFE_OUTPUTS:
             rpi.io[name].value = 0
+        # This oddly named LED channel drives the boiler-panel interlock.
+        # Energized (1) blocks the auxiliary thermostats.
+        rpi.io.T_RevPiLED_WWSD.value = 1
         if not rpi.writeprocimg():
             raise RuntimeError("failed to write one or more safe outputs")
     finally:

@@ -43,6 +43,10 @@ def analyze(rows, period, config):
     fan_seconds = {}
     observed_seconds = 0.0
     day_seconds = {}
+    main_heat_seconds = 0.0
+    apt_heat_seconds = 0.0
+    heat_mode_seconds = 0.0
+    auxiliary_heat_enable_seconds = 0.0
     for current, following in zip(rows, rows[1:]):
         delta = (following["timestamp"] - current["timestamp"]).total_seconds()
         if delta <= 0 or delta > config.maximum_sample_gap_seconds:
@@ -57,17 +61,29 @@ def analyze(rows, period, config):
         apt_seconds[apt] = apt_seconds.get(apt, 0.0) + delta
         fan_seconds[fan] = fan_seconds.get(fan, 0.0) + delta
         day = current["timestamp"].date().isoformat()
-        bucket = day_seconds.setdefault(day, {"observed": 0.0, "cooling": 0.0, "vent": 0.0})
+        bucket = day_seconds.setdefault(day, {"observed": 0.0, "cooling": 0.0, "vent": 0.0, "main_heat": 0.0, "apt_heat": 0.0})
         bucket["observed"] += delta
         if current.get("cooling_active"):
             bucket["cooling"] += delta
         if current.get("vent_active"):
             bucket["vent"] += delta
+        if current.get("frst_heat_allowed"):
+            main_heat_seconds += delta
+            bucket["main_heat"] += delta
+        if current.get("apt_heat_allowed"):
+            apt_heat_seconds += delta
+            bucket["apt_heat"] += delta
+        if current.get("main_heat_mode_latched"):
+            heat_mode_seconds += delta
+        if current.get("boiler_panel_interlock_blocked") is False:
+            auxiliary_heat_enable_seconds += delta
 
     main_calls, main_durations = _episodes(rows, "FRST_COOL")
     apt_calls, apt_durations = _episodes(rows, "APT_COOL")
     cooling_starts, _ = _episodes(rows, "cooling_active")
     vent_cycles, _ = _episodes(rows, "vent_active")
+    main_heat_calls, main_heat_durations = _episodes(rows, "FRST_HEAT")
+    apt_heat_calls, apt_heat_durations = _episodes(rows, "APT_HEAT")
     fan_errors = [abs(a - b) for a, b in zip(
         _finite(rows, "fan_target_speed"), _finite(rows, "fan_actual_speed")
     )]
@@ -81,6 +97,14 @@ def analyze(rows, period, config):
         "rows": len(rows),
         "cooling_starts": cooling_starts,
         "vent_cycles": vent_cycles,
+        "main_heat_calls": main_heat_calls,
+        "apartment_heat_calls": apt_heat_calls,
+        "main_median_heat_minutes": median(main_heat_durations) if main_heat_durations else 0.0,
+        "apartment_median_heat_minutes": median(apt_heat_durations) if apt_heat_durations else 0.0,
+        "main_heat_hours": main_heat_seconds / 3600.0,
+        "apartment_heat_hours": apt_heat_seconds / 3600.0,
+        "main_heat_mode_hours": heat_mode_seconds / 3600.0,
+        "auxiliary_heat_enable_hours": auxiliary_heat_enable_seconds / 3600.0,
         "main_calls": main_calls,
         "apartment_calls": apt_calls,
         "main_median_call_minutes": median(main_durations) if main_durations else 0.0,
@@ -101,7 +125,9 @@ def analyze(rows, period, config):
     }
     daily_rows = [
         {"date": day, "observed_hours": data["observed"] / 3600.0,
-         "cooling_hours": data["cooling"] / 3600.0, "vent_hours": data["vent"] / 3600.0}
+         "cooling_hours": data["cooling"] / 3600.0, "vent_hours": data["vent"] / 3600.0,
+         "main_heat_hours": data["main_heat"] / 3600.0,
+         "apartment_heat_hours": data["apt_heat"] / 3600.0}
         for day, data in sorted(day_seconds.items())
     ]
     hours = lambda data: {key: value / 3600.0 for key, value in sorted(data.items())}

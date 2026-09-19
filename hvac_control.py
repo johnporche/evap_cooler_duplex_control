@@ -13,11 +13,12 @@ from zoneinfo import ZoneInfo
 from hvac_airflow import (
     dampers_require_startup_settle,
     next_post_cool_state,
+    next_post_heat_fan_suppression,
     select_damper_commands,
     select_zone_airflow,
 )
 from hvac_log_manager import RotatingCsvLog, RotatingTextLog
-from hvac_modes import describe_zone_mode
+from hvac_modes import boiler_panel_interlock_should_block, describe_zone_mode
 from hvac_ms1 import MS1Decoder, next_low_oat_lockout
 from hvac_prewet import select_prewet
 
@@ -228,6 +229,10 @@ outputs = {
     "WWSD": rpi.io.T_RevPiLED_WWSD,
 }
 
+# T_RevPiLED_WWSD drives the boiler-panel interlock. Energized means blocked;
+# establish the safe state immediately rather than waiting for the first loop.
+outputs["WWSD"].value = 1
+
 
 # ============================================================
 # PROGRAM STATE
@@ -236,6 +241,7 @@ outputs = {
 fan_current_volts = 0.0
 
 warm_weather_shutdown = None
+boiler_interlock_blocked = None
 cooler_low_oat_lockout = None
 
 floor_modes = {
@@ -267,6 +273,16 @@ previous_cool_calls = {
 }
 
 post_cool_active = {
+    "FRST": False,
+    "APT": False,
+}
+
+previous_heat_calls = {
+    "FRST": False,
+    "APT": False,
+}
+
+post_heat_fan_suppressed = {
     "FRST": False,
     "APT": False,
 }
@@ -999,7 +1015,6 @@ def update_wwsd(oat_calibrated_f):
     global warm_weather_shutdown
 
     if oat_calibrated_f is None:
-        outputs["WWSD"].value = 0
         return warm_weather_shutdown
 
     old = warm_weather_shutdown
@@ -1015,8 +1030,6 @@ def update_wwsd(oat_calibrated_f):
     elif warm_weather_shutdown and oat_calibrated_f <= WWSD_OFF_TEMP_F:
         warm_weather_shutdown = False
 
-    outputs["WWSD"].value = 1 if warm_weather_shutdown else 0
-
     if old is not None and warm_weather_shutdown != old:
         if warm_weather_shutdown:
             console_event("WWSD ON: OAT=" + format(oat_calibrated_f, ".1f") + " F")
@@ -1024,6 +1037,33 @@ def update_wwsd(oat_calibrated_f):
             console_event("WWSD OFF: OAT=" + format(oat_calibrated_f, ".1f") + " F")
 
     return warm_weather_shutdown
+
+
+def update_boiler_panel_interlock():
+    """Drive the boiler-panel thermostat block relay (1 means blocked)."""
+    global boiler_interlock_blocked
+
+    old = boiler_interlock_blocked
+    boiler_interlock_blocked = boiler_panel_interlock_should_block(
+        last_calls["FRST"],
+        warm_weather_shutdown,
+    )
+    outputs["WWSD"].value = 1 if boiler_interlock_blocked else 0
+
+    if old is not None and boiler_interlock_blocked != old:
+        if boiler_interlock_blocked:
+            reason = (
+                "warm weather shutdown"
+                if warm_weather_shutdown is not False
+                else "main-floor mode is not HEAT"
+            )
+            console_event("Boiler panel interlock BLOCKED: " + reason)
+        else:
+            console_event(
+                "Boiler panel interlock ENABLED: main-floor HEAT mode established"
+            )
+
+    return boiler_interlock_blocked
 
 
 # ============================================================
@@ -1066,6 +1106,20 @@ def update_post_cool_modes(floor_requests):
         )
 
 
+def update_post_heat_fan_suppression(floor_requests):
+    for prefix in ("FRST", "APT"):
+        request = floor_requests[prefix]
+        previous_heat_calls[prefix], post_heat_fan_suppressed[prefix] = (
+            next_post_heat_fan_suppression(
+                previous_heat=previous_heat_calls[prefix],
+                suppressed=post_heat_fan_suppressed[prefix],
+                heat=request["heat"],
+                cool=request["cool"],
+                fan=request["fan"],
+            )
+        )
+
+
 def _format_floor_diagnostic(diagnostic):
     requested = diagnostic["requested_mode"]
     effective = diagnostic["effective_mode"]
@@ -1092,6 +1146,7 @@ def update_floor_diagnostics(floor_requests, oat_f):
             cool=request["cool"],
             fan=request["fan"],
             post_cool_active=post_cool_active[prefix],
+            post_heat_fan_suppressed=post_heat_fan_suppressed[prefix],
             warm_weather_shutdown=bool(warm_weather_shutdown),
             cooler_state=ms1_status.state,
             cooler_fault_code=ms1_status.fault_code,
@@ -1163,19 +1218,25 @@ def apply_airflow_damper_logic(floor_requests, cooler_available):
 
     # A fan request without heat or cool is a valid ventilation request.
     # Post-cooling fan operation uses the same airflow path. Fan-stage inputs
-    # during heat remain ignored because get_floor_request selects HEAT first.
+    # during heat and fan overrun that persists after heat remain ignored.
     frst_vent_allowed = (
         cooler_available
         and (
             frst_cool_to_vent
-            or frst_request["mode"] == "VENT"
+            or (
+                frst_request["mode"] == "VENT"
+                and not post_heat_fan_suppressed["FRST"]
+            )
         )
     )
     apt_vent_allowed = (
         cooler_available
         and (
             apt_cool_to_vent
-            or apt_request["mode"] == "VENT"
+            or (
+                apt_request["mode"] == "VENT"
+                and not post_heat_fan_suppressed["APT"]
+            )
         )
     )
 
@@ -1603,6 +1664,8 @@ def get_state_snapshot(extra):
     row["warm_weather_shutdown"] = warm_weather_shutdown
     row["wwsd_on_temp_f"] = WWSD_ON_TEMP_F
     row["wwsd_off_temp_f"] = WWSD_OFF_TEMP_F
+    row["main_heat_mode_latched"] = last_calls["FRST"] == "HEAT"
+    row["boiler_panel_interlock_blocked"] = boiler_interlock_blocked
     row["cooler_low_oat_lockout"] = cooler_low_oat_lockout
     row["cool_pump_enable_oat_f"] = COOL_PUMP_ENABLE_OAT_F
     row["cool_pump_disable_oat_f"] = COOL_PUMP_DISABLE_OAT_F
@@ -1706,6 +1769,8 @@ try:
         "apt_cool_allowed": False,
         "frst_vent_allowed": False,
         "apt_vent_allowed": False,
+        "frst_post_heat_fan_suppressed": False,
+        "apt_post_heat_fan_suppressed": False,
         "frst_cool_to_vent": False,
         "apt_cool_to_vent": False,
         "frst_cooling_rejection_reason": "",
@@ -1756,7 +1821,9 @@ try:
             "APT": get_floor_request("APT"),
         }
         update_post_cool_modes(floor_requests)
+        update_post_heat_fan_suppression(floor_requests)
         update_floor_diagnostics(floor_requests, oat_calibrated_f)
+        update_boiler_panel_interlock()
 
         frst_heat_allowed, apt_heat_allowed = apply_heating_logic()
 
@@ -1920,6 +1987,8 @@ try:
                 "apt_cool_allowed": apt_cool_allowed,
                 "frst_vent_allowed": frst_vent_allowed,
                 "apt_vent_allowed": apt_vent_allowed,
+                "frst_post_heat_fan_suppressed": post_heat_fan_suppressed["FRST"],
+                "apt_post_heat_fan_suppressed": post_heat_fan_suppressed["APT"],
                 "frst_cool_to_vent": frst_cool_to_vent,
                 "apt_cool_to_vent": apt_cool_to_vent,
                 "frst_cooling_rejection_reason": frst_cooling_rejection_reason,
@@ -1962,7 +2031,8 @@ finally:
     outputs["FRST_BOILER"].value = 0
     outputs["APT_BOILER"].value = 0
 
-    outputs["WWSD"].value = 0
+    # T_RevPiLED_WWSD drives the boiler-panel interlock; 1 means blocked.
+    outputs["WWSD"].value = 1
 
     console_event("Controller exiting. Fan off, BMS off, boilers off, dampers open.")
     #rpi.close()

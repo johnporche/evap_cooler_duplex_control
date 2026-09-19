@@ -1,6 +1,6 @@
 import unittest
 
-from hvac_modes import describe_zone_mode
+from hvac_modes import boiler_panel_interlock_should_block, describe_zone_mode
 
 
 def describe(**overrides):
@@ -9,6 +9,7 @@ def describe(**overrides):
         "cool": False,
         "fan": False,
         "post_cool_active": False,
+        "post_heat_fan_suppressed": False,
         "warm_weather_shutdown": False,
         "cooler_state": "READY",
         "cooler_fault_code": None,
@@ -20,6 +21,15 @@ def describe(**overrides):
 
 
 class ZoneModeDiagnosticTests(unittest.TestCase):
+    def test_boiler_interlock_latches_main_floor_heat_mode(self):
+        self.assertTrue(boiler_panel_interlock_should_block(None, False))
+        self.assertTrue(boiler_panel_interlock_should_block("COOL", False))
+        self.assertFalse(boiler_panel_interlock_should_block("HEAT", False))
+
+    def test_boiler_interlock_wwsd_and_unknown_state_fail_safe(self):
+        self.assertTrue(boiler_panel_interlock_should_block("HEAT", True))
+        self.assertTrue(boiler_panel_interlock_should_block("HEAT", None))
+
     def test_ready_cooling_is_not_blocked(self):
         self.assertEqual(describe(cool=True), ("COOL", "COOL", "NONE"))
 
@@ -81,6 +91,12 @@ class ZoneModeDiagnosticTests(unittest.TestCase):
         self.assertEqual(
             describe(heat=True, fan=True),
             ("HEAT", "HEAT", "NONE"),
+        )
+
+    def test_post_heat_fan_is_explicitly_suppressed(self):
+        self.assertEqual(
+            describe(fan=True, post_heat_fan_suppressed=True),
+            ("VENT", "OFF", "POST_HEAT_FAN_SUPPRESSED"),
         )
 
     def test_post_cool_vent_is_allowed(self):

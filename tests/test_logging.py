@@ -77,6 +77,37 @@ class LoggingTests(unittest.TestCase):
         self.assertEqual(row["ms1_status_volts"], 10.682)
         self.assertFalse(row["ms1_fault_active"])
 
+    def test_reader_preserves_new_heat_interlock_states_and_legacy_unknowns(self):
+        path = self.root / "current.csv"
+        stamp = datetime(2026, 8, 4, 12, tzinfo=self.tz)
+        with path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(
+                stream,
+                fieldnames=[
+                    "timestamp_iso", "FRST_HEAT", "frst_heat_allowed",
+                    "main_heat_mode_latched", "boiler_panel_interlock_blocked",
+                ],
+            )
+            writer.writeheader()
+            writer.writerow({
+                "timestamp_iso": stamp.isoformat(),
+                "FRST_HEAT": "True",
+                "frst_heat_allowed": "True",
+                "main_heat_mode_latched": "True",
+                "boiler_panel_interlock_blocked": "False",
+            })
+            writer.writerow({"timestamp_iso": (stamp + timedelta(seconds=5)).isoformat()})
+        period = ReportPeriod("test", "test", stamp - timedelta(minutes=1), stamp + timedelta(minutes=1))
+
+        current, legacy = read_rows([path], period)
+
+        self.assertTrue(current["FRST_HEAT"])
+        self.assertTrue(current["frst_heat_allowed"])
+        self.assertTrue(current["main_heat_mode_latched"])
+        self.assertFalse(current["boiler_panel_interlock_blocked"])
+        self.assertIsNone(legacy["main_heat_mode_latched"])
+        self.assertIsNone(legacy["boiler_panel_interlock_blocked"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -70,7 +70,7 @@ def write_html_report(html_root, config, period, metrics, chart_source_dir):
     chart_dir = destination / "charts"
     chart_dir.mkdir(parents=True, exist_ok=True)
     source = Path(chart_source_dir)
-    for name in ("fan.svg", "temperatures.svg", "main_zone_delivery.svg", "apartment_zone_delivery.svg"):
+    for name in ("fan.svg", "heat.svg", "temperatures.svg", "main_zone_delivery.svg", "apartment_zone_delivery.svg"):
         source_file = source / name
         destination_file = chart_dir / name
         if source_file.resolve() != destination_file.resolve():
@@ -84,13 +84,18 @@ def write_html_report(html_root, config, period, metrics, chart_source_dir):
         for state, hours in metrics.state_hours.items()
     ) or "<p>No observed state data.</p>"
     daily_rows = "".join(
-        f"<tr><td>{item['date']}</td><td>{item['observed_hours']:.2f}</td><td>{item['cooling_hours']:.2f}</td><td>{item['vent_hours']:.2f}</td></tr>"
+        f"<tr><td>{item['date']}</td><td>{item['observed_hours']:.2f}</td><td>{item['cooling_hours']:.2f}</td><td>{item['vent_hours']:.2f}</td><td>{item['main_heat_hours']:.2f}</td><td>{item['apartment_heat_hours']:.2f}</td></tr>"
         for item in metrics.daily_rows
-    ) or '<tr><td colspan="4">No observed days</td></tr>'
+    ) or '<tr><td colspan="6">No observed days</td></tr>'
     cards = [
         ("Coverage", f"{v['coverage']:.1%}"), ("Cooling starts", str(v["cooling_starts"])),
         ("Vent cycles", str(v["vent_cycles"])), ("Main calls", str(v["main_calls"])),
         ("Apartment calls", str(v["apartment_calls"])), ("Max outdoor", _fmt(v["max_oat_f"], 1, " F")),
+        ("Main heat calls", str(v["main_heat_calls"])),
+        ("Apartment heat calls", str(v["apartment_heat_calls"])),
+        ("Main heat output", _fmt(v["main_heat_hours"], 2, " h")),
+        ("Apartment heat output", _fmt(v["apartment_heat_hours"], 2, " h")),
+        ("Aux heat enabled", _fmt(v["auxiliary_heat_enable_hours"], 2, " h")),
         ("Active supply", _fmt(v["mean_active_supply_f"], 1, " F")),
     ]
     card_html = "".join(f'<div class="card"><strong>{escape(label)}</strong><span>{escape(value)}</span></div>' for label, value in cards)
@@ -100,9 +105,9 @@ def write_html_report(html_root, config, period, metrics, chart_source_dir):
 <h1>{escape(config.site_name)}</h1><h2>{escape(period.label)}</h2>
 <p><span class="status {status_class}">{status_text}</span> &nbsp; {period.start.strftime('%Y-%m-%d %H:%M %Z')} to {period.end.strftime('%Y-%m-%d %H:%M %Z')}</p>
 <div class="cards">{card_html}</div>
-<section class="charts"><div class="panel"><img src="charts/fan.svg" alt="Main and apartment thermostat demand aligned with actual fan speed"></div><div class="panel"><img src="charts/temperatures.svg" alt="Outdoor and common supply temperature chart"></div><div class="panel"><img src="charts/main_zone_delivery.svg" alt="Main-floor supply delta with damper and airflow-request state"></div><div class="panel"><img src="charts/apartment_zone_delivery.svg" alt="Apartment supply delta with damper and airflow-request state"><p><small>White means damper commanded closed; gray means commanded open without that zone requesting airflow; zone color means commanded open with that zone requesting airflow. Commands are not measured blade positions.</small></p></div></section>
+<section class="charts"><div class="panel"><img src="charts/fan.svg" alt="Main and apartment thermostat demand aligned with actual fan speed"></div><div class="panel"><img src="charts/heat.svg" alt="Heating requests, boiler outputs, and auxiliary thermostat enable state"></div><div class="panel"><img src="charts/temperatures.svg" alt="Outdoor and common supply temperature chart"></div><div class="panel"><img src="charts/main_zone_delivery.svg" alt="Main-floor supply delta with damper and airflow-request state"></div><div class="panel"><img src="charts/apartment_zone_delivery.svg" alt="Apartment supply delta with damper and airflow-request state"><p><small>White means damper commanded closed; gray means commanded open without that zone requesting airflow; zone color means commanded open with that zone requesting airflow. Commands are not measured blade positions.</small></p></div></section>
 <section class="panel"><h2>Operating-state hours</h2>{state_bars}</section>
-<section class="panel"><h2>Daily aggregation</h2><table><thead><tr><th>Date</th><th>Observed h</th><th>Cooling h</th><th>Vent h</th></tr></thead><tbody>{daily_rows}</tbody></table></section>
+<section class="panel"><h2>Daily aggregation</h2><table><thead><tr><th>Date</th><th>Observed h</th><th>Cooling h</th><th>Vent h</th><th>Main heat h</th><th>Apt heat h</th></tr></thead><tbody>{daily_rows}</tbody></table></section>
 <section class="panel"><h2>Diagnostics</h2><p>Static-pressure input OK: {v['static_pressure_ok_percent']:.1%} of samples<br>MS1 ready: {_fmt(v['ms1_ready_percent'], 1, '%') if v['ms1_ready_percent'] is None else f"{v['ms1_ready_percent']:.1%}"}<br>MS1 fault: {v['ms1_fault_samples']} samples<br>MS1 offline: {v['ms1_offline_samples']} samples<br>Observed samples: {v['rows']:,}</p><p>No Ecobee, room-temperature, occupancy, or setpoint data is used.</p></section>
 </main><footer>Portable static report - HTML, CSS, and SVG only.</footer></body></html>'''
     (destination / "index.html").write_text(page, encoding="utf-8")

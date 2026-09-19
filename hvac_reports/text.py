@@ -87,7 +87,18 @@ def write_text_report(path, config, period, metrics, rows, ascii_only=False):
     apartment_delta = [row.get("therm_apt_delta_from_supply_f") for row in rows]
     main_damper = [0 if row.get("FRST_DMP_CLOSE") else 1 for row in rows]
     apartment_damper = [0 if row.get("APT_DMP_CLOSE") else 1 for row in rows]
-    daily = [[item["date"], f"{item['observed_hours']:.2f}", f"{item['cooling_hours']:.2f}", f"{item['vent_hours']:.2f}"] for item in metrics.daily_rows]
+    main_heat = [1 if row.get("frst_heat_allowed") else 0 for row in rows]
+    apartment_heat = [1 if row.get("apt_heat_allowed") else 0 for row in rows]
+    heat_mode = [
+        None if row.get("main_heat_mode_latched") is None else int(row["main_heat_mode_latched"])
+        for row in rows
+    ]
+    auxiliary_heat = [
+        None if row.get("boiler_panel_interlock_blocked") is None
+        else int(not row["boiler_panel_interlock_blocked"])
+        for row in rows
+    ]
+    daily = [[item["date"], f"{item['observed_hours']:.2f}", f"{item['cooling_hours']:.2f}", f"{item['vent_hours']:.2f}", f"{item['main_heat_hours']:.2f}", f"{item['apartment_heat_hours']:.2f}"] for item in metrics.daily_rows]
     text = f"""{rule}
 {config.site_name}
 HVAC SYSTEM PERFORMANCE REPORT - {period.kind.upper()}
@@ -102,6 +113,14 @@ CALLS AND AIRFLOW
   Vent cycles          {v['vent_cycles']:>7}
   Main-floor calls     {v['main_calls']:>7}   median {_value(v['main_median_call_minutes'])} min
   Apartment calls      {v['apartment_calls']:>7}   median {_value(v['apartment_median_call_minutes'])} min
+
+HEATING
+  Main heat calls      {v['main_heat_calls']:>7}   median {_value(v['main_median_heat_minutes'])} min
+  Apartment heat calls {v['apartment_heat_calls']:>7}   median {_value(v['apartment_median_heat_minutes'])} min
+  Main boiler output   {v['main_heat_hours']:>7.2f} h
+  Apartment boiler     {v['apartment_heat_hours']:>7.2f} h
+  Main HEAT mode       {v['main_heat_mode_hours']:>7.2f} h
+  Aux heat enabled     {v['auxiliary_heat_enable_hours']:>7.2f} h
 TEMPERATURES
   Mean outdoor         {_value(v['mean_oat_f'])} F
   Maximum outdoor      {_value(v['max_oat_f'])} F
@@ -119,9 +138,13 @@ TIME-SERIES OVERVIEW (left = report start, right = report end)
   Apt delta   {sparkline(apartment_delta, ascii_only=ascii_only)}
   Main damper {sparkline(main_damper, minimum=0, maximum=1, ascii_only=ascii_only)}  (high=open)
   Apt damper  {sparkline(apartment_damper, minimum=0, maximum=1, ascii_only=ascii_only)}  (high=open)
+  Main heat   {sparkline(main_heat, minimum=0, maximum=1, ascii_only=ascii_only)}  (high=boiler output on)
+  Apt heat    {sparkline(apartment_heat, minimum=0, maximum=1, ascii_only=ascii_only)}  (high=boiler output on)
+  HEAT mode   {sparkline(heat_mode, minimum=0, maximum=1, ascii_only=ascii_only)}  (high=latched)
+  Aux enable  {sparkline(auxiliary_heat, minimum=0, maximum=1, ascii_only=ascii_only)}  (high=enabled)
 
 DAILY AGGREGATION
-{_table(['Date', 'Observed h', 'Cooling h', 'Vent h'], daily or [['--','0','0','0']], ascii_only)}
+{_table(['Date', 'Observed h', 'Cooling h', 'Vent h', 'Main heat h', 'Apt heat h'], daily or [['--','0','0','0','0','0']], ascii_only)}
 
 DIAGNOSTICS
   Static-pressure input OK   {v['static_pressure_ok_percent']:.1%} of samples

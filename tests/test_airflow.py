@@ -3,6 +3,7 @@ import unittest
 from hvac_airflow import (
     dampers_require_startup_settle,
     next_post_cool_state,
+    next_post_heat_fan_suppression,
     select_damper_commands,
     select_zone_airflow,
 )
@@ -86,6 +87,38 @@ class PostCoolStateTests(unittest.TestCase):
     def test_vent_timeout_clears_post_cool(self):
         self.assertEqual(
             next_post_cool_state(False, True, False, False, True, True),
+            (False, False),
+        )
+
+
+class PostHeatFanSuppressionTests(unittest.TestCase):
+    def test_fan_remaining_on_when_heat_ends_is_suppressed(self):
+        self.assertEqual(
+            next_post_heat_fan_suppression(True, False, False, False, True),
+            (False, True),
+        )
+
+    def test_suppression_remains_while_fan_remains_on(self):
+        self.assertEqual(
+            next_post_heat_fan_suppression(False, True, False, False, True),
+            (False, True),
+        )
+
+    def test_fan_off_clears_suppression(self):
+        self.assertEqual(
+            next_post_heat_fan_suppression(False, True, False, False, False),
+            (False, False),
+        )
+
+    def test_later_fresh_fan_call_is_not_suppressed(self):
+        self.assertEqual(
+            next_post_heat_fan_suppression(False, False, False, False, True),
+            (False, False),
+        )
+
+    def test_cooling_clears_suppression(self):
+        self.assertEqual(
+            next_post_heat_fan_suppression(False, True, False, True, True),
             (False, False),
         )
 

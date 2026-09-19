@@ -34,6 +34,32 @@ def next_post_cool_state(
     return False, False
 
 
+def next_post_heat_fan_suppression(
+    previous_heat,
+    suppressed,
+    heat,
+    cool,
+    fan,
+):
+    """Return ``(current_heat_memory, suppress_fan)`` for one zone.
+
+    A fan signal that remains asserted when HEAT ends is treated as heat-system
+    overrun, not as a new ventilation request. Suppression remains latched
+    until every fan stage drops. A cooling call also clears it because cooling
+    owns the fan request at that point.
+    """
+    if heat:
+        return True, False
+
+    if cool or not fan:
+        return False, False
+
+    if previous_heat and fan:
+        return False, True
+
+    return False, bool(suppressed and fan)
+
+
 def select_zone_airflow(
     frst_cool_allowed,
     apt_cool_allowed,

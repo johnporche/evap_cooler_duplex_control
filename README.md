@@ -70,6 +70,8 @@ report.txt
 report.tex
 charts/fan.svg
 charts/fan.tex
+charts/heat.svg
+charts/heat.tex
 charts/temperatures.svg
 charts/temperatures.tex
 charts/main_zone_delivery.svg
@@ -106,6 +108,9 @@ blade-position feedback; a position sensor would be required to plot actual
 intermediate damper position. Daily and weekly charts also mark sunrise, solar
 noon, and sunset using the timestamps recorded in the controller log. Markers
 are omitted from seasonal and annual charts to avoid unreadable line density.
+The heating chart aligns each zone's heat request with its boiler output and
+the auxiliary-thermostat enable signal, making WWSD rejection and main-floor
+HEAT-mode transitions visible.
 
 For rotated logs, repeat `--log` for each file. To generate LaTeX and SVG
 without compiling the PDF, add `--no-pdf`.
@@ -190,7 +195,10 @@ run with the pump off, and ventilation is limited to fan speed 2 and the
 
 Heating always cancels post-cooling state. Fan-stage inputs that accompany a
 `HEAT` call are ignored by the evaporative-cooler airflow logic because the
-cooler fan is not available for heating.
+cooler fan is not available for heating. If the fan signal remains on when
+`HEAT` ends, that zone reports `POST_HEAT_FAN_SUPPRESSED` and ignores the fan
+until all fan stages turn off. A later, fresh fan-only call is accepted as
+intentional `VENT`.
 
 Wet cooling has priority over ventilation when the zones differ:
 
@@ -238,6 +246,12 @@ hysteresis: it disables at 45 F and re-enables at 50 F. A cooling call during
 that lockout becomes fan-only free cooling when the MS1 is ready. An unknown
 OAT fails pump-safe. The old remembered per-floor OAT mode no longer gates
 thermostat calls, preventing cool morning calls from becoming stuck in IDLE.
+
+`T_RevPiLED_WWSD` also drives the boiler-panel thermostat interlock despite its
+PiCtory LED name. A value of 1 blocks the auxiliary thermostats. The interlock
+starts blocked, is enabled when a main-floor heat call establishes the latched
+HEAT mode, and is blocked again by a later main-floor cooling call or by WWSD.
+Ending an individual heat call does not clear the latched HEAT mode.
 
 ## Log rotation and retention
 
