@@ -241,7 +241,9 @@ shutdown; low-OAT free cooling; rejected standalone fan calls; and conflicting
 heat/cool inputs.
 
 Boiler availability is independent and follows the existing 70 F on / 65 F
-reset warm-weather shutdown. Evaporative pump operation has separate low-OAT
+reset warm-weather shutdown. On controller startup, WWSD initializes from the
+70 F trip threshold so a restart in the 65-70 F hysteresis band does not
+spuriously block heat. Evaporative pump operation has separate low-OAT
 hysteresis: it disables at 45 F and re-enables at 50 F. A cooling call during
 that lockout becomes fan-only free cooling when the MS1 is ready. An unknown
 OAT fails pump-safe. The old remembered per-floor OAT mode no longer gates

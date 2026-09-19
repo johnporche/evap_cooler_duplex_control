@@ -24,6 +24,13 @@ def boiler_panel_interlock_should_block(main_last_call, warm_weather_shutdown):
     return main_last_call != "HEAT" or warm_weather_shutdown is not False
 
 
+def initial_wwsd_state(oat_f, shutdown_temp_f):
+    """Initialize WWSD from its trip point when no prior state is known."""
+    if oat_f is None:
+        return None
+    return oat_f >= shutdown_temp_f
+
+
 def describe_zone_mode(
     *,
     heat,

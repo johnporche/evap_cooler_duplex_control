@@ -18,7 +18,11 @@ from hvac_airflow import (
     select_zone_airflow,
 )
 from hvac_log_manager import RotatingCsvLog, RotatingTextLog
-from hvac_modes import boiler_panel_interlock_should_block, describe_zone_mode
+from hvac_modes import (
+    boiler_panel_interlock_should_block,
+    describe_zone_mode,
+    initial_wwsd_state,
+)
 from hvac_ms1 import MS1Decoder, next_low_oat_lockout
 from hvac_prewet import select_prewet
 
@@ -1019,10 +1023,13 @@ def update_wwsd(oat_calibrated_f):
 
     old = warm_weather_shutdown
 
-    # At startup the prior hysteresis state is unknowable. Conservatively keep
-    # heat disabled above the 65 F reset threshold.
+    # At startup the prior hysteresis state is unknowable. Use the 70 F trip
+    # point so a restart in the 65-70 F deadband does not spuriously block heat.
     if warm_weather_shutdown is None:
-        warm_weather_shutdown = oat_calibrated_f > WWSD_OFF_TEMP_F
+        warm_weather_shutdown = initial_wwsd_state(
+            oat_calibrated_f,
+            WWSD_ON_TEMP_F,
+        )
 
     elif (not warm_weather_shutdown) and oat_calibrated_f >= WWSD_ON_TEMP_F:
         warm_weather_shutdown = True
